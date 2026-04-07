@@ -174,23 +174,32 @@ pub async fn run() -> Result<()> {
 
     let inner = response.into_inner();
 
-    let _aggregator = crate::engine::errors::ErrorAggregator::new();
+    let mut aggregator = crate::engine::errors::ErrorAggregator::new();
     if let Some(status) = inner.partial_failure_error {
-        // Here we could extract `status` using our `parse_partial_failures` but for MVP:
         println!("\x1b[1;31mPartial Failures Detected!\x1b[0m");
-        // Decode details or log status
-        // tonic status details can be unpacked from any prost payload
-        println!("Details: {:?}", status.details);
+        aggregator.parse_partial_failures(&status.details);
+        for error in &aggregator.errors {
+            println!("\x1b[31m  - {}\x1b[0m", error);
+        }
     }
 
-    let successes = inner.mutate_operation_responses.len();
     let total = operations.len();
+    let mut successes = 0;
+    for res in &inner.mutate_operation_responses {
+        if res.response.is_some() {
+            successes += 1;
+        }
+    }
     let failures = total.saturating_sub(successes);
 
     println!(
         "\x1b[1;32mApply Summary: {} attempted, {} succeeded, {} failed.\x1b[0m",
         total, successes, failures
     );
+
+    if failures > 0 {
+        return Err(anyhow::anyhow!("Apply completed with {} partial failures.", failures));
+    }
 
     Ok(())
 }
