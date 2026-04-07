@@ -6,13 +6,28 @@ use std::str::FromStr;
 pub struct Campaign {
     pub id: Option<i64>,
     pub name: String,
-    pub status: String, // PAUSED, ENABLED, REMOVED
+    pub status: String,
+    #[serde(skip)]
+    #[allow(dead_code)]
+    pub budget_id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub daily_budget: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bidding_strategy: Option<BiddingStrategy>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub locations: Vec<Location>,
+    #[serde(default)]
+    pub callouts: Vec<Callout>,
+    #[serde(default)]
+    pub sitelinks: Vec<Sitelink>,
     #[serde(default)]
     pub negative_keywords: Vec<Keyword>,
     #[serde(default)]
     pub ad_groups: Vec<AdGroup>,
-    #[serde(default)]
-    pub sitelinks: Vec<Sitelink>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -20,12 +35,16 @@ pub struct AdGroup {
     pub id: Option<i64>,
     pub name: String,
     pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub demographics: Option<Demographics>,
     #[serde(default)]
     pub ads: Vec<TextAd>,
     #[serde(default)]
     pub keywords: Vec<Keyword>,
     #[serde(default)]
     pub negative_keywords: Vec<Keyword>,
+    #[serde(default)]
+    pub callouts: Vec<Callout>,
     #[serde(default)]
     pub sitelinks: Vec<Sitelink>,
 }
@@ -57,12 +76,42 @@ pub struct Keyword {
     pub match_type: String, // EXACT, BROAD, PHRASE
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(tag = "type")]
+pub enum BiddingStrategy {
+    TargetCpa { target_cpa: f64 },
+    TargetRoas { target_roas: f64 },
+    MaximizeConversions { target_cpa: Option<f64> },
+    MaximizeConversionValue { target_roas: Option<f64> },
+    ManualCpc { enhanced_cpc_enabled: bool },
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Location {
+    #[serde(skip)]
+    pub criterion_id: Option<i64>,
+    pub geo_target_constant: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Callout {
+    #[serde(skip)]
+    pub asset_id: Option<i64>,
+    pub text: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct Demographics {
+    pub genders: Vec<String>,
+    pub age_ranges: Vec<String>,
+}
+
 impl fmt::Display for Keyword {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self.match_type.as_str() {
             "EXACT" => write!(f, "[{}]", self.text),
             "PHRASE" => write!(f, "\"{}\"", self.text),
-            "BROAD" | _ => write!(f, "{}", self.text),
+            _ => write!(f, "{}", self.text),
         }
     }
 }

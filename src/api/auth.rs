@@ -11,15 +11,19 @@ pub struct GoogleAdsAuth {
 }
 
 pub async fn get_auth_token() -> Result<GoogleAdsAuth> {
-    let dev_token = env::var("GOOGLE_ADS_DEVELOPER_TOKEN").unwrap();
+    let dev_token =
+        env::var("GOOGLE_ADS_DEVELOPER_TOKEN").context("Missing GOOGLE_ADS_DEVELOPER_TOKEN")?;
 
-    let customer_id = env::var("GOOGLE_PROJECT_ID").unwrap().replace("-", "");
-
-    let login_customer_id = env::var("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
-        .unwrap()
+    let customer_id = env::var("GOOGLE_PROJECT_ID")
+        .context("Missing GOOGLE_PROJECT_ID")?
         .replace("-", "");
 
-    let creds_path = env::var("GOOGLE_APPLICATION_CREDENTIALS").unwrap();
+    let login_customer_id = env::var("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
+        .unwrap_or_else(|_| customer_id.clone())
+        .replace("-", "");
+
+    let creds_path = env::var("GOOGLE_APPLICATION_CREDENTIALS")
+        .context("Missing GOOGLE_APPLICATION_CREDENTIALS")?;
 
     let secret = read_service_account_key(&creds_path)
         .await

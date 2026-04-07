@@ -8,7 +8,7 @@ impl AccountId {
     /// Creates a new AccountId, automatically stripping hyphens and validating it contains exactly 10 digits.
     pub fn new(id: &str) -> Result<Self, String> {
         let clean = id.replace("-", "");
-        if clean.len() != 10 || !clean.chars().all(|c| c.is_digit(10)) {
+        if clean.len() != 10 || !clean.chars().all(|c| c.is_ascii_digit()) {
             return Err(format!("Invalid Account ID '{}': must be 10 digits", id));
         }
         Ok(AccountId(clean))
