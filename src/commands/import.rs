@@ -1,209 +1,224 @@
 use crate::api::client::GoogleAdsClient;
-use crate::models::schema::{AdGroup, BiddingStrategy, Campaign};
+use crate::models::schema::{
+    AdGroup, BiddingStrategy, Callout, Campaign, Keyword, Sitelink, TextAd,
+};
 use anyhow::Result;
 use googleads_rs::google::ads::googleads::v23::resources as gads_resources;
-use googleads_rs::google::ads::googleads::v23::services::SearchGoogleAdsRequest;
+use googleads_rs::google::ads::googleads::v23::services::{
+    SearchGoogleAdsRequest, SearchGoogleAdsResponse,
+};
 use std::collections::HashMap;
 use std::fs::File;
+use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 
-pub async fn fetch_remote_campaigns(
+type SearchResults = (
+    SearchGoogleAdsResponse,
+    SearchGoogleAdsResponse,
+    SearchGoogleAdsResponse,
+    SearchGoogleAdsResponse,
+    SearchGoogleAdsResponse,
+    SearchGoogleAdsResponse,
+    SearchGoogleAdsResponse,
+    SearchGoogleAdsResponse,
+    SearchGoogleAdsResponse,
+);
+
+pub fn fetch_remote_campaigns(
     account_id: &crate::models::account::AccountId,
-) -> Result<HashMap<i64, Campaign>> {
-    println!(
-        "Fetching remote state for account: {}...",
-        account_id.hyphenated()
-    );
+) -> Pin<Box<dyn Future<Output = Result<HashMap<i64, Campaign>>> + Send + '_>> {
+    let account_id = account_id.clone();
+    Box::pin(async move {
+        let ga_client = GoogleAdsClient::new().await?;
+        let customer_id = account_id.unhyphenated();
 
-    let mut ga_client = GoogleAdsClient::new().await?;
-    ga_client.customer_id = account_id.unhyphenated();
+        let queries = [
+            "SELECT campaign.id, campaign.name, campaign.status, campaign.start_date_time, campaign.end_date_time, campaign.bidding_strategy_type, campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas, campaign_budget.id, campaign_budget.amount_micros FROM campaign WHERE campaign.status != 'REMOVED'",
+            "SELECT campaign.id, ad_group.id, ad_group.name, ad_group.status FROM ad_group WHERE ad_group.status != 'REMOVED'",
+            "SELECT ad_group.id, ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, ad_group_criterion.negative FROM ad_group_criterion WHERE ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.status != 'REMOVED'",
+            "SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad.ad.final_urls, ad_group_ad.ad.responsive_search_ad.headlines, ad_group_ad.ad.responsive_search_ad.descriptions FROM ad_group_ad WHERE ad_group_ad.status != 'REMOVED'",
+            "SELECT campaign.id, asset.id, asset.sitelink_asset.link_text, asset.sitelink_asset.description1, asset.sitelink_asset.description2, asset.final_urls FROM campaign_asset WHERE campaign_asset.field_type = 'SITELINK' AND campaign_asset.status != 'REMOVED'",
+            "SELECT ad_group.id, asset.id, asset.sitelink_asset.link_text, asset.sitelink_asset.description1, asset.sitelink_asset.description2, asset.final_urls FROM ad_group_asset WHERE ad_group_asset.field_type = 'SITELINK' AND ad_group_asset.status != 'REMOVED'",
+            "SELECT campaign.id, asset.id, asset.callout_asset.callout_text FROM campaign_asset WHERE campaign_asset.field_type = 'CALLOUT' AND campaign_asset.status != 'REMOVED'",
+            "SELECT ad_group.id, asset.id, asset.callout_asset.callout_text FROM ad_group_asset WHERE ad_group_asset.field_type = 'CALLOUT' AND ad_group_asset.status != 'REMOVED'",
+            "SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.keyword.text, campaign_criterion.keyword.match_type, campaign_criterion.negative FROM campaign_criterion WHERE campaign_criterion.type = 'KEYWORD'",
+        ];
 
-    // 1. Fetch Campaigns, Budgets and core settings
-    let camp_query = "SELECT campaign.id, campaign.name, campaign.status, campaign.start_date_time, \
-                      campaign.end_date_time, campaign.bidding_strategy_type, \
-                      campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas, \
-                      campaign_budget.id, campaign_budget.amount_micros \
-                      FROM campaign WHERE campaign.status != 'REMOVED'";
-    let camp_req = SearchGoogleAdsRequest {
-        customer_id: ga_client.customer_id.clone(),
-        query: camp_query.to_string(),
-        ..Default::default()
-    };
+        let mut handles = Vec::new();
+        for query in queries {
+            let mut client = ga_client.client.clone();
+            let cid = customer_id.clone();
+            let q = query.to_string();
+            handles.push(tokio::spawn(async move {
+                client
+                    .search(SearchGoogleAdsRequest {
+                        customer_id: cid,
+                        query: q,
+                        ..Default::default()
+                    })
+                    .await
+            }));
+        }
+
+        let mut results = Vec::new();
+        for h in handles {
+            results.push(
+                h.await
+                    .map_err(|e| anyhow::anyhow!(e))?
+                    .map_err(|e| anyhow::anyhow!(e))?
+                    .into_inner(),
+            );
+        }
+
+        // Drop huge response objects as we extract what we need in a separate sync step
+        // to keep the async state machine small.
+        assemble_campaigns(results)
+    })
+}
+
+fn assemble_campaigns(results: Vec<SearchGoogleAdsResponse>) -> Result<HashMap<i64, Campaign>> {
+    if results.len() != 9 {
+        return Err(anyhow::anyhow!("Expected 9 query results"));
+    }
+    let mut results = results.into_iter();
+
+    let c_res = results.next().unwrap();
+    let ag_res = results.next().unwrap();
+    let kw_res = results.next().unwrap();
+    let ad_res = results.next().unwrap();
+    let cs_res = results.next().unwrap();
+    let ags_res = results.next().unwrap();
+    let cc_res = results.next().unwrap();
+    let agc_res = results.next().unwrap();
+    let ckw_res = results.next().unwrap();
 
     let mut campaigns = HashMap::new();
 
-    match ga_client.client.search(camp_req).await {
-        Ok(response) => {
-            for row in response.into_inner().results {
-                if let Some(c) = row.campaign {
-                    let camp_id = c.id;
-                    let status_str = match c.status {
-                        2 => "ENABLED",
-                        3 => "PAUSED",
-                        4 => "REMOVED",
-                        _ => "UNKNOWN",
-                    };
-
-                    let mut budget_id = None;
-                    let mut daily_budget = None;
-                    if let Some(cb) = row.campaign_budget {
-                        budget_id = Some(cb.id);
-                        daily_budget = Some(cb.amount_micros as f64 / 1_000_000.0);
-                    }
-
-                    let bidding_strategy = match c.campaign_bidding_strategy {
-                        Some(gads_resources::campaign::CampaignBiddingStrategy::TargetCpa(t)) => Some(BiddingStrategy::TargetCpa { target_cpa: t.target_cpa_micros as f64 / 1_000_000.0 }),
-                        Some(gads_resources::campaign::CampaignBiddingStrategy::TargetRoas(t)) => Some(BiddingStrategy::TargetRoas { target_roas: t.target_roas }),
-                        Some(gads_resources::campaign::CampaignBiddingStrategy::MaximizeConversions(_)) => Some(BiddingStrategy::MaximizeConversions { target_cpa: None }),
-                        Some(gads_resources::campaign::CampaignBiddingStrategy::MaximizeConversionValue(_)) => Some(BiddingStrategy::MaximizeConversionValue { target_roas: None }),
-                        Some(gads_resources::campaign::CampaignBiddingStrategy::ManualCpc(t)) => Some(BiddingStrategy::ManualCpc { enhanced_cpc_enabled: t.enhanced_cpc_enabled }),
-                        _ => None,
-                    };
-
-                    campaigns.insert(
-                        camp_id,
-                        Campaign {
-                            id: Some(c.id),
-                            name: c.name.clone(),
-                            status: status_str.to_string(),
-                            budget_id,
-                            daily_budget,
-                            bidding_strategy,
-                            start_date: Some(c.start_date_time.clone()).filter(|s| !s.is_empty()),
-                            end_date: Some(c.end_date_time.clone()).filter(|s| !s.is_empty()),
-                            locations: vec![],
-                            callouts: vec![],
-                            sitelinks: vec![],
-                            negative_keywords: vec![],
-                            ad_groups: vec![],
-                        },
-                    );
-                }
+    // 1. Process Campaigns
+    for row in c_res.results {
+        if let Some(c) = row.campaign {
+            let camp_id = c.id;
+            let status_str = match c.status {
+                2 => "ENABLED",
+                3 => "PAUSED",
+                4 => "REMOVED",
+                _ => "UNKNOWN",
+            };
+            let mut budget_id = None;
+            let mut daily_budget = None;
+            if let Some(cb) = row.campaign_budget {
+                budget_id = Some(cb.id);
+                daily_budget = Some(cb.amount_micros as f64 / 1_000_000.0);
             }
-        }
-        Err(e) => {
-            println!("GRPC Error Status: {:?}", e);
-            println!("Detailed Error: {}", String::from_utf8_lossy(e.details()));
-            return Err(e.into());
+            let bidding_strategy = match c.campaign_bidding_strategy {
+                Some(gads_resources::campaign::CampaignBiddingStrategy::TargetCpa(t)) => {
+                    Some(BiddingStrategy::TargetCpa {
+                        target_cpa: t.target_cpa_micros as f64 / 1_000_000.0,
+                    })
+                }
+                Some(gads_resources::campaign::CampaignBiddingStrategy::TargetRoas(t)) => {
+                    Some(BiddingStrategy::TargetRoas {
+                        target_roas: t.target_roas,
+                    })
+                }
+                Some(gads_resources::campaign::CampaignBiddingStrategy::MaximizeConversions(_)) => {
+                    Some(BiddingStrategy::MaximizeConversions { target_cpa: None })
+                }
+                Some(
+                    gads_resources::campaign::CampaignBiddingStrategy::MaximizeConversionValue(_),
+                ) => Some(BiddingStrategy::MaximizeConversionValue { target_roas: None }),
+                Some(gads_resources::campaign::CampaignBiddingStrategy::ManualCpc(t)) => {
+                    Some(BiddingStrategy::ManualCpc {
+                        enhanced_cpc_enabled: t.enhanced_cpc_enabled,
+                    })
+                }
+                _ => None,
+            };
+            campaigns.insert(
+                camp_id,
+                Campaign {
+                    id: Some(c.id),
+                    name: c.name,
+                    status: status_str.to_string(),
+                    budget_id,
+                    daily_budget,
+                    bidding_strategy,
+                    start_date: Some(c.start_date_time).filter(|s: &String| !s.is_empty()),
+                    end_date: Some(c.end_date_time).filter(|s: &String| !s.is_empty()),
+                    locations: vec![],
+                    callouts: vec![],
+                    sitelinks: vec![],
+                    negative_keywords: vec![],
+                    ad_groups: vec![],
+                },
+            );
         }
     }
 
-    if campaigns.is_empty() {
-        println!(
-            "No campaigns found for account {}.",
-            account_id.hyphenated()
-        );
-        return Ok(campaigns);
-    }
-
-    // 2. Fetch AdGroups
-    let ag_query = "SELECT campaign.id, ad_group.id, ad_group.name, ad_group.status FROM ad_group WHERE ad_group.status != 'REMOVED'";
-    let ag_req = SearchGoogleAdsRequest {
-        customer_id: ga_client.customer_id.clone(),
-        query: ag_query.to_string(),
-        ..Default::default()
-    };
-
-    if let Ok(response) = ga_client.client.search(ag_req).await {
-        for row in response.into_inner().results {
-            if let (Some(c), Some(ag)) = (row.campaign, row.ad_group)
-                && let Some(campaign) = campaigns.get_mut(&c.id)
-            {
-                let status_str = match ag.status {
+    // 2. Index AdGroups
+    let mut ad_groups_map = HashMap::new();
+    for row in ag_res.results {
+        if let (Some(c), Some(ag)) = (row.campaign, row.ad_group) {
+            let ad_group = AdGroup {
+                id: Some(ag.id),
+                name: ag.name,
+                status: match ag.status {
                     2 => "ENABLED",
                     3 => "PAUSED",
-                    4 => "REMOVED",
                     _ => "UNKNOWN",
-                };
-
-                campaign.ad_groups.push(AdGroup {
-                    id: Some(ag.id),
-                    name: ag.name.clone(),
-                    status: status_str.to_string(),
-                    demographics: None,
-                    ads: vec![],
-                    sitelinks: vec![],
-                    callouts: vec![],
-                    keywords: vec![],
-                    negative_keywords: vec![],
-                });
-            }
+                }
+                .to_string(),
+                demographics: None,
+                ads: vec![],
+                keywords: vec![],
+                negative_keywords: vec![],
+                callouts: vec![],
+                sitelinks: vec![],
+            };
+            ad_groups_map.insert(ag.id, (c.id, ad_group));
         }
     }
 
-    // 3. Fetch Keywords
-    let kw_query = "SELECT ad_group.id, ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, ad_group_criterion.negative FROM ad_group_criterion WHERE ad_group_criterion.type = 'KEYWORD' AND ad_group_criterion.status != 'REMOVED'";
-    let kw_req = SearchGoogleAdsRequest {
-        customer_id: ga_client.customer_id.clone(),
-        query: kw_query.to_string(),
-        ..Default::default()
-    };
-
-    if let Ok(response) = ga_client.client.search(kw_req).await {
-        for row in response.into_inner().results {
-            if let (Some(ag), Some(agc)) = (row.ad_group, row.ad_group_criterion) {
-                for camp in campaigns.values_mut() {
-                    if let Some(ad_group) = camp.ad_groups.iter_mut().find(|a| a.id == Some(ag.id))
-                        && let Some(gads_resources::ad_group_criterion::Criterion::Keyword(
-                            ref kw_info,
-                        )) = agc.criterion
-                    {
-                        let match_type_str = match kw_info.match_type {
+    // 3. Process Keywords
+    for row in kw_res.results {
+        if let (Some(ag), Some(agc)) = (row.ad_group, row.ad_group_criterion) {
+            if let Some(entry) = ad_groups_map.get_mut(&ag.id) {
+                if let Some(gads_resources::ad_group_criterion::Criterion::Keyword(k)) =
+                    agc.criterion
+                {
+                    let kw = Keyword {
+                        criterion_id: Some(agc.criterion_id),
+                        text: k.text,
+                        match_type: match k.match_type {
                             2 => "EXACT",
                             3 => "PHRASE",
                             4 => "BROAD",
                             _ => "UNKNOWN",
-                        };
-                        let kw_obj = crate::models::schema::Keyword {
-                            criterion_id: Some(agc.criterion_id),
-                            text: kw_info.text.clone(),
-                            match_type: match_type_str.to_string(),
-                        };
-                        if agc.negative {
-                            ad_group.negative_keywords.push(kw_obj);
-                        } else {
-                            ad_group.keywords.push(kw_obj);
                         }
+                        .to_string(),
+                    };
+                    if agc.negative {
+                        entry.1.negative_keywords.push(kw);
+                    } else {
+                        entry.1.keywords.push(kw);
                     }
                 }
             }
         }
     }
 
-    // 4. Fetch Ads
-    let ad_query = "SELECT ad_group.id, ad_group_ad.ad.id, ad_group_ad.ad.final_urls, ad_group_ad.ad.responsive_search_ad.headlines, ad_group_ad.ad.responsive_search_ad.descriptions FROM ad_group_ad WHERE ad_group_ad.status != 'REMOVED'";
-    let ad_req = SearchGoogleAdsRequest {
-        customer_id: ga_client.customer_id.clone(),
-        query: ad_query.to_string(),
-        ..Default::default()
-    };
-
-    if let Ok(response) = ga_client.client.search(ad_req).await {
-        for row in response.into_inner().results {
-            if let (Some(ag), Some(aga)) = (row.ad_group, row.ad_group_ad) {
-                for camp in campaigns.values_mut() {
-                    if let Some(ad_group) = camp.ad_groups.iter_mut().find(|a| a.id == Some(ag.id))
-                        && let Some(ref ad) = aga.ad
-                    {
-                        let mut headlines = vec![];
-                        let mut descriptions = vec![];
-
-                        if let Some(gads_resources::ad::AdData::ResponsiveSearchAd(ref rsa)) =
-                            ad.ad_data
-                        {
-                            for hl in &rsa.headlines {
-                                headlines.push(hl.text.clone());
-                            }
-                            for desc in &rsa.descriptions {
-                                descriptions.push(desc.text.clone());
-                            }
-                        }
-
-                        ad_group.ads.push(crate::models::schema::TextAd {
+    // 4. Process Ads
+    for row in ad_res.results {
+        if let (Some(ag), Some(aga)) = (row.ad_group, row.ad_group_ad) {
+            if let Some(ad) = aga.ad {
+                if let Some(entry) = ad_groups_map.get_mut(&ag.id) {
+                    if let Some(gads_resources::ad::AdData::ResponsiveSearchAd(rsa)) = ad.ad_data {
+                        entry.1.ads.push(TextAd {
                             id: Some(ad.id),
-                            headlines,
-                            descriptions,
-                            final_urls: ad.final_urls.clone(),
+                            final_urls: ad.final_urls,
+                            headlines: rsa.headlines.into_iter().map(|h| h.text).collect(),
+                            descriptions: rsa.descriptions.into_iter().map(|d| d.text).collect(),
                         });
                     }
                 }
@@ -211,156 +226,97 @@ pub async fn fetch_remote_campaigns(
         }
     }
 
-    // 5. Fetch Campaign Sitelinks
-    let cs_query = "SELECT campaign.id, asset.id, asset.sitelink_asset.link_text, asset.sitelink_asset.description1, asset.sitelink_asset.description2, asset.final_urls FROM campaign_asset WHERE campaign_asset.field_type = 'SITELINK' AND campaign_asset.status != 'REMOVED'";
-    let cs_req = SearchGoogleAdsRequest {
-        customer_id: ga_client.customer_id.clone(),
-        query: cs_query.to_string(),
-        ..Default::default()
-    };
-
-    if let Ok(response) = ga_client.client.search(cs_req).await {
-        for row in response.into_inner().results {
-            if let (Some(c), Some(asset)) = (row.campaign, row.asset)
-                && let Some(camp) = campaigns.get_mut(&c.id)
-                && let Some(gads_resources::asset::AssetData::SitelinkAsset(ref sl)) =
-                    asset.asset_data
-            {
-                camp.sitelinks.push(crate::models::schema::Sitelink {
-                    asset_id: Some(asset.id),
-                    link_text: sl.link_text.clone(),
-                    final_urls: asset.final_urls.clone(),
-                    line1: if sl.description1.is_empty() {
-                        None
-                    } else {
-                        Some(sl.description1.clone())
-                    },
-                    line2: if sl.description2.is_empty() {
-                        None
-                    } else {
-                        Some(sl.description2.clone())
-                    },
-                });
-            }
-        }
-    }
-
-    // 6. Fetch AdGroup Sitelinks
-    let ags_query = "SELECT ad_group.id, asset.id, asset.sitelink_asset.link_text, asset.sitelink_asset.description1, asset.sitelink_asset.description2, asset.final_urls FROM ad_group_asset WHERE ad_group_asset.field_type = 'SITELINK' AND ad_group_asset.status != 'REMOVED'";
-    let ags_req = SearchGoogleAdsRequest {
-        customer_id: ga_client.customer_id.clone(),
-        query: ags_query.to_string(),
-        ..Default::default()
-    };
-
-    if let Ok(response) = ga_client.client.search(ags_req).await {
-        for row in response.into_inner().results {
-            if let (Some(ag), Some(asset)) = (row.ad_group, row.asset) {
-                for camp in campaigns.values_mut() {
-                    if let Some(ad_group) = camp.ad_groups.iter_mut().find(|a| a.id == Some(ag.id))
-                        && let Some(gads_resources::asset::AssetData::SitelinkAsset(ref sl)) =
-                            asset.asset_data
-                    {
-                        ad_group.sitelinks.push(crate::models::schema::Sitelink {
-                            asset_id: Some(asset.id),
-                            link_text: sl.link_text.clone(),
-                            final_urls: asset.final_urls.clone(),
-                            line1: if sl.description1.is_empty() {
-                                None
-                            } else {
-                                Some(sl.description1.clone())
-                            },
-                            line2: if sl.description2.is_empty() {
-                                None
-                            } else {
-                                Some(sl.description2.clone())
-                            },
-                        });
-                    }
+    // 5. Process Campaign Sitelinks
+    for row in cs_res.results {
+        if let (Some(c), Some(asset)) = (row.campaign, row.asset) {
+            if let Some(camp) = campaigns.get_mut(&c.id) {
+                if let Some(gads_resources::asset::AssetData::SitelinkAsset(sl)) = asset.asset_data
+                {
+                    camp.sitelinks.push(Sitelink {
+                        asset_id: Some(asset.id),
+                        link_text: sl.link_text,
+                        final_urls: asset.final_urls,
+                        line1: Some(sl.description1),
+                        line2: Some(sl.description2),
+                    });
                 }
             }
         }
     }
 
-    // 7. Fetch Campaign Callouts
-    let cc_query = "SELECT campaign.id, asset.id, asset.callout_asset.callout_text FROM campaign_asset WHERE campaign_asset.field_type = 'CALLOUT' AND campaign_asset.status != 'REMOVED'";
-    let cc_req = SearchGoogleAdsRequest {
-        customer_id: ga_client.customer_id.clone(),
-        query: cc_query.to_string(),
-        ..Default::default()
-    };
-
-    if let Ok(response) = ga_client.client.search(cc_req).await {
-        for row in response.into_inner().results {
-            if let (Some(c), Some(asset)) = (row.campaign, row.asset)
-                && let Some(camp) = campaigns.get_mut(&c.id)
-                && let Some(gads_resources::asset::AssetData::CalloutAsset(ref co)) =
-                    asset.asset_data
-            {
-                camp.callouts.push(crate::models::schema::Callout {
-                    asset_id: Some(asset.id),
-                    text: co.callout_text.clone(),
-                });
-            }
-        }
-    }
-
-    // 8. Fetch AdGroup Callouts
-    let agc_query = "SELECT ad_group.id, asset.id, asset.callout_asset.callout_text FROM ad_group_asset WHERE ad_group_asset.field_type = 'CALLOUT' AND ad_group_asset.status != 'REMOVED'";
-    let agc_req = SearchGoogleAdsRequest {
-        customer_id: ga_client.customer_id.clone(),
-        query: agc_query.to_string(),
-        ..Default::default()
-    };
-
-    if let Ok(response) = ga_client.client.search(agc_req).await {
-        for row in response.into_inner().results {
-            if let (Some(ag), Some(asset)) = (row.ad_group, row.asset) {
-                for camp in campaigns.values_mut() {
-                    if let Some(ad_group) = camp.ad_groups.iter_mut().find(|a| a.id == Some(ag.id))
-                        && let Some(gads_resources::asset::AssetData::CalloutAsset(ref co)) =
-                            asset.asset_data
-                    {
-                        ad_group.callouts.push(crate::models::schema::Callout {
-                            asset_id: Some(asset.id),
-                            text: co.callout_text.clone(),
-                        });
-                    }
+    // 6. Process AdGroup Sitelinks
+    for row in ags_res.results {
+        if let (Some(ag), Some(asset)) = (row.ad_group, row.asset) {
+            if let Some(entry) = ad_groups_map.get_mut(&ag.id) {
+                if let Some(gads_resources::asset::AssetData::SitelinkAsset(sl)) = asset.asset_data
+                {
+                    entry.1.sitelinks.push(Sitelink {
+                        asset_id: Some(asset.id),
+                        link_text: sl.link_text,
+                        final_urls: asset.final_urls,
+                        line1: Some(sl.description1),
+                        line2: Some(sl.description2),
+                    });
                 }
             }
         }
     }
 
-    // 9. Fetch Campaign Negative Keywords
-    let ckw_query = "SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.keyword.text, campaign_criterion.keyword.match_type, campaign_criterion.negative FROM campaign_criterion WHERE campaign_criterion.type = 'KEYWORD'";
-    let ckw_req = SearchGoogleAdsRequest {
-        customer_id: ga_client.customer_id.clone(),
-        query: ckw_query.to_string(),
-        ..Default::default()
-    };
+    // 7. Process Campaign Callouts
+    for row in cc_res.results {
+        if let (Some(c), Some(asset)) = (row.campaign, row.asset) {
+            if let Some(camp) = campaigns.get_mut(&c.id) {
+                if let Some(gads_resources::asset::AssetData::CalloutAsset(co)) = asset.asset_data {
+                    camp.callouts.push(Callout {
+                        asset_id: Some(asset.id),
+                        text: co.callout_text,
+                    });
+                }
+            }
+        }
+    }
 
-    if let Ok(response) = ga_client.client.search(ckw_req).await {
-        for row in response.into_inner().results {
-            if let (Some(c), Some(cc)) = (row.campaign, row.campaign_criterion)
-                && let Some(camp) = campaigns.get_mut(&c.id)
-                && let Some(gads_resources::campaign_criterion::Criterion::Keyword(ref kw_info)) =
+    // 8. Process AdGroup Callouts
+    for row in agc_res.results {
+        if let (Some(ag), Some(asset)) = (row.ad_group, row.asset) {
+            if let Some(entry) = ad_groups_map.get_mut(&ag.id) {
+                if let Some(gads_resources::asset::AssetData::CalloutAsset(co)) = asset.asset_data {
+                    entry.1.callouts.push(Callout {
+                        asset_id: Some(asset.id),
+                        text: co.callout_text,
+                    });
+                }
+            }
+        }
+    }
+
+    // 9. Process Campaign Negative Keywords
+    for row in ckw_res.results {
+        if let (Some(c), Some(cc)) = (row.campaign, row.campaign_criterion) {
+            if let Some(camp) = campaigns.get_mut(&c.id) {
+                if let Some(gads_resources::campaign_criterion::Criterion::Keyword(k)) =
                     cc.criterion
-            {
-                let match_type_str = match kw_info.match_type {
-                    2 => "EXACT",
-                    3 => "PHRASE",
-                    4 => "BROAD",
-                    _ => "UNKNOWN",
-                };
-                let kw_obj = crate::models::schema::Keyword {
-                    criterion_id: Some(cc.criterion_id),
-                    text: kw_info.text.clone(),
-                    match_type: match_type_str.to_string(),
-                };
-                if cc.negative {
-                    camp.negative_keywords.push(kw_obj);
+                {
+                    camp.negative_keywords.push(Keyword {
+                        criterion_id: Some(cc.criterion_id),
+                        text: k.text,
+                        match_type: match k.match_type {
+                            2 => "EXACT",
+                            3 => "PHRASE",
+                            4 => "BROAD",
+                            _ => "UNKNOWN",
+                        }
+                        .to_string(),
+                    });
                 }
             }
+        }
+    }
+
+    // Final Assembly
+    for (camp_id, ad_group) in ad_groups_map.into_values() {
+        if let Some(camp) = campaigns.get_mut(&camp_id) {
+            camp.ad_groups.push(ad_group);
         }
     }
 
@@ -372,16 +328,12 @@ pub async fn run(account_id_str: &str) -> Result<()> {
         crate::models::account::AccountId::new(account_id_str).map_err(|e| anyhow::anyhow!(e))?;
     let campaigns = fetch_remote_campaigns(&account_id).await?;
 
-    // Export to YAML
     for (camp_id, campaign) in campaigns.into_iter() {
         let filename = format!("{}_{}_campaign.yaml", account_id.hyphenated(), camp_id);
         let mut file = File::create(&filename)?;
-
         let yaml_string = serde_yaml::to_string(&campaign)?;
         file.write_all(yaml_string.as_bytes())?;
-
         println!("Successfully exported YAML to {}", filename);
     }
-
     Ok(())
 }

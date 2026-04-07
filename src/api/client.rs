@@ -33,7 +33,6 @@ impl tonic::service::Interceptor for GAdsInterceptor {
 
 pub struct GoogleAdsClient {
     pub client: GAdsClient,
-    pub customer_id: String,
 }
 
 impl GoogleAdsClient {
@@ -57,7 +56,6 @@ impl GoogleAdsClient {
 
         Ok(Self {
             client,
-            customer_id: auth.customer_id,
         })
     }
 }

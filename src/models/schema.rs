@@ -30,7 +30,23 @@ pub struct Campaign {
     pub ad_groups: Vec<AdGroup>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl Campaign {
+    pub fn normalize(&mut self) {
+        self.locations.sort_by_key(|l| l.geo_target_constant.clone());
+        self.callouts.sort_by_key(|c| c.text.clone());
+        self.sitelinks.sort_by_key(|s| s.link_text.clone());
+        for sitelink in &mut self.sitelinks {
+            sitelink.normalize();
+        }
+        self.negative_keywords.sort_by_key(|k| k.to_string());
+        for ad_group in &mut self.ad_groups {
+            ad_group.normalize();
+        }
+        self.ad_groups.sort_by_key(|ag| ag.name.clone());
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct AdGroup {
     pub id: Option<i64>,
     pub name: String,
@@ -49,7 +65,23 @@ pub struct AdGroup {
     pub sitelinks: Vec<Sitelink>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl AdGroup {
+    pub fn normalize(&mut self) {
+        self.ads.sort_by_key(|a| a.headlines.first().cloned().unwrap_or_default());
+        for ad in &mut self.ads {
+            ad.normalize();
+        }
+        self.keywords.sort_by_key(|k| k.to_string());
+        self.negative_keywords.sort_by_key(|k| k.to_string());
+        self.callouts.sort_by_key(|c| c.text.clone());
+        self.sitelinks.sort_by_key(|s| s.link_text.clone());
+        for sitelink in &mut self.sitelinks {
+            sitelink.normalize();
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Sitelink {
     #[serde(skip)]
     pub asset_id: Option<i64>,
@@ -61,7 +93,13 @@ pub struct Sitelink {
     pub line2: Option<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+impl Sitelink {
+    pub fn normalize(&mut self) {
+        self.final_urls.sort();
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct TextAd {
     pub id: Option<i64>,
     pub headlines: Vec<String>,
@@ -69,7 +107,15 @@ pub struct TextAd {
     pub final_urls: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+impl TextAd {
+    pub fn normalize(&mut self) {
+        self.headlines.sort();
+        self.descriptions.sort();
+        self.final_urls.sort();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Keyword {
     pub criterion_id: Option<i64>,
     pub text: String,
@@ -86,21 +132,21 @@ pub enum BiddingStrategy {
     ManualCpc { enhanced_cpc_enabled: bool },
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Location {
     #[serde(skip)]
     pub criterion_id: Option<i64>,
     pub geo_target_constant: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Callout {
     #[serde(skip)]
     pub asset_id: Option<i64>,
     pub text: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct Demographics {
     pub genders: Vec<String>,
     pub age_ranges: Vec<String>,

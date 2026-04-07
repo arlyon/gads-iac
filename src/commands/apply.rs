@@ -47,14 +47,17 @@ pub async fn run() -> Result<()> {
     );
     debug!("Total campaigns loaded: {}", local_campaigns.len());
 
-    println!("\x1b[1;34mFetching remote state...\x1b[0m");
-    let remote_map = fetch_remote_campaigns(&account_id).await?;
+    println!("DEBUG: [apply] About to call fetch_remote_campaigns...");
+    let mut remote_map = fetch_remote_campaigns(&account_id).await?;
+    println!("DEBUG: [apply] fetch_remote_campaigns returned.");
 
     let mut clean = true;
 
-    for local in &local_campaigns {
+    for local in &mut local_campaigns {
+        local.normalize();
         if let Some(camp_id) = local.id {
-            if let Some(remote) = remote_map.get(&camp_id) {
+            if let Some(remote) = remote_map.get_mut(&camp_id) {
+                remote.normalize();
                 let diffs = compute_diff(local, remote);
                 if !diffs.is_empty() {
                     clean = false;

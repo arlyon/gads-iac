@@ -1,6 +1,5 @@
 use prost::Message;
 use std::fmt;
-use tracing::error;
 
 #[derive(Clone, PartialEq, Message)]
 pub struct GoogleAdsFailure {
@@ -25,7 +24,7 @@ pub struct GoogleAdsError {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct ErrorCode {
-    // We just need the struct to exist for decoding to continue, 
+    // We just need the struct to exist for decoding to continue,
     // we don't need to parse the oneof unless we want specific codes.
 }
 
@@ -72,7 +71,9 @@ impl ErrorAggregator {
         for err in failure.errors {
             let mut msg = err.message;
             if let Some(loc) = err.location {
-                let path: Vec<String> = loc.field_path_elements.iter()
+                let path: Vec<String> = loc
+                    .field_path_elements
+                    .iter()
                     .map(|e| {
                         if let Some(i) = e.index {
                             format!("{}[{}]", e.field_name, i)

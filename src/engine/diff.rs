@@ -10,8 +10,13 @@ use tracing::{debug, trace};
 pub fn compute_diff(local: &Campaign, remote: &Campaign) -> Vec<String> {
     let mut differences = Vec::new();
 
-    let local_yml = serde_yaml::to_string(local).unwrap_or_default();
-    let remote_yml = serde_yaml::to_string(remote).unwrap_or_default();
+    let mut local_norm = local.clone();
+    local_norm.normalize();
+    let mut remote_norm = remote.clone();
+    remote_norm.normalize();
+
+    let local_yml = serde_yaml::to_string(&local_norm).unwrap_or_default();
+    let remote_yml = serde_yaml::to_string(&remote_norm).unwrap_or_default();
 
     if local_yml == remote_yml {
         return differences;
@@ -20,23 +25,39 @@ pub fn compute_diff(local: &Campaign, remote: &Campaign) -> Vec<String> {
     let l_lines: Vec<&str> = local_yml.lines().collect();
     let r_lines: Vec<&str> = remote_yml.lines().collect();
 
-    let mut l_adds = 0;
+    use std::collections::HashMap;
+    let mut l_counts = HashMap::new();
+    for line in &l_lines { *l_counts.entry(line).or_insert(0) += 1; }
+    let mut r_counts = HashMap::new();
+    for line in &r_lines { *r_counts.entry(line).or_insert(0) += 1; }
+
+    let mut added = Vec::new();
+    let mut r_counts_temp = r_counts.clone();
     for line in &l_lines {
-        if !r_lines.contains(line) {
-            differences.push(format!("+ {}", line));
-            l_adds += 1;
+        let r_c = r_counts_temp.entry(line).or_insert(0);
+        if *r_c > 0 {
+            *r_c -= 1;
+        } else {
+            added.push(format!("+ {}", line));
         }
     }
 
+    let mut removed = Vec::new();
+    let mut l_counts_temp = l_counts.clone();
     for line in &r_lines {
-        if !l_lines.contains(line) {
-            differences.push(format!("- {}", line));
-            l_adds += 1;
+        let l_c = l_counts_temp.entry(line).or_insert(0);
+        if *l_c > 0 {
+            *l_c -= 1;
+        } else {
+            removed.push(format!("- {}", line));
         }
     }
 
-    if l_adds == 0 {
-        differences.push("~ State difference detected (likely array sorting/sequence)".to_string());
+    differences.extend(added);
+    differences.extend(removed);
+
+    if differences.is_empty() && local_yml != remote_yml {
+        differences.push("~ State difference detected (order/formatting only)".to_string());
     }
 
     differences
@@ -209,4 +230,138 @@ pub fn build_mutations(
     }
 
     operations
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::schema::{Campaign, Keyword};
+
+    #[test]
+    fn test_compute_diff_ignores_keyword_order() {
+        let local = Campaign {
+            id: Some(1),
+            name: "Test Campaign".to_string(),
+            status: "ENABLED".to_string(),
+            budget_id: None,
+            daily_budget: None,
+            bidding_strategy: None,
+            start_date: None,
+            end_date: None,
+            locations: vec![],
+            callouts: vec![],
+            sitelinks: vec![],
+            negative_keywords: vec![
+                Keyword {
+                    criterion_id: None,
+                    text: "kw1".to_string(),
+                    match_type: "EXACT".to_string(),
+                },
+                Keyword {
+                    criterion_id: None,
+                    text: "kw2".to_string(),
+                    match_type: "EXACT".to_string(),
+                },
+            ],
+            ad_groups: vec![],
+        };
+
+        let remote = Campaign {
+            id: Some(1),
+            name: "Test Campaign".to_string(),
+            status: "ENABLED".to_string(),
+            budget_id: None,
+            daily_budget: None,
+            bidding_strategy: None,
+            start_date: None,
+            end_date: None,
+            locations: vec![],
+            callouts: vec![],
+            sitelinks: vec![],
+            negative_keywords: vec![
+                Keyword {
+                    criterion_id: None,
+                    text: "kw2".to_string(),
+                    match_type: "EXACT".to_string(),
+                },
+                Keyword {
+                    criterion_id: None,
+                    text: "kw1".to_string(),
+                    match_type: "EXACT".to_string(),
+                },
+            ],
+            ad_groups: vec![],
+        };
+
+        let diffs = compute_diff(&local, &remote);
+        assert!(diffs.is_empty(), "Differences found: {:?}", diffs);
+    }
+
+    #[test]
+    fn test_compute_diff_ignores_sitelink_and_url_order() {
+        let local = Campaign {
+            id: Some(1),
+            name: "Test Campaign".to_string(),
+            status: "ENABLED".to_string(),
+            budget_id: None,
+            daily_budget: None,
+            bidding_strategy: None,
+            start_date: None,
+            end_date: None,
+            locations: vec![],
+            callouts: vec![],
+            sitelinks: vec![
+                crate::models::schema::Sitelink {
+                    asset_id: None,
+                    link_text: "Site 1".to_string(),
+                    final_urls: vec!["url2".to_string(), "url1".to_string()],
+                    line1: None,
+                    line2: None,
+                },
+                crate::models::schema::Sitelink {
+                    asset_id: None,
+                    link_text: "Site 2".to_string(),
+                    final_urls: vec!["url3".to_string()],
+                    line1: None,
+                    line2: None,
+                },
+            ],
+            negative_keywords: vec![],
+            ad_groups: vec![],
+        };
+
+        let remote = Campaign {
+            id: Some(1),
+            name: "Test Campaign".to_string(),
+            status: "ENABLED".to_string(),
+            budget_id: None,
+            daily_budget: None,
+            bidding_strategy: None,
+            start_date: None,
+            end_date: None,
+            locations: vec![],
+            callouts: vec![],
+            sitelinks: vec![
+                crate::models::schema::Sitelink {
+                    asset_id: None,
+                    link_text: "Site 2".to_string(),
+                    final_urls: vec!["url3".to_string()],
+                    line1: None,
+                    line2: None,
+                },
+                crate::models::schema::Sitelink {
+                    asset_id: None,
+                    link_text: "Site 1".to_string(),
+                    final_urls: vec!["url1".to_string(), "url2".to_string()],
+                    line1: None,
+                    line2: None,
+                },
+            ],
+            negative_keywords: vec![],
+            ad_groups: vec![],
+        };
+
+        let diffs = compute_diff(&local, &remote);
+        assert!(diffs.is_empty(), "Differences found: {:?}", diffs);
+    }
 }

@@ -6,19 +6,25 @@ mod commands;
 mod engine;
 mod models;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let cli_parsed = cli::Cli::parse();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .thread_stack_size(8 * 1024 * 1024)
+        .enable_all()
+        .build()?;
 
-    match &cli_parsed.command {
-        cli::Commands::Import { account_id } => commands::import::run(account_id).await?,
-        cli::Commands::Plan => commands::plan::run().await?,
-        cli::Commands::Apply => commands::apply::run().await?,
-    }
+    runtime.block_on(async move {
+        let cli_parsed = cli::Cli::parse();
 
-    Ok(())
+        match &cli_parsed.command {
+            cli::Commands::Import { account_id } => commands::import::run(account_id).await?,
+            cli::Commands::Plan => commands::plan::run().await?,
+            cli::Commands::Apply => commands::apply::run().await?,
+        }
+
+        Ok(())
+    })
 }
