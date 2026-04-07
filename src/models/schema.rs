@@ -32,6 +32,8 @@ pub struct AdGroup {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Sitelink {
+    #[serde(skip)]
+    pub asset_id: Option<i64>,
     pub link_text: String,
     pub final_urls: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -50,6 +52,7 @@ pub struct TextAd {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Keyword {
+    pub criterion_id: Option<i64>,
     pub text: String,
     pub match_type: String, // EXACT, BROAD, PHRASE
 }
@@ -71,16 +74,19 @@ impl FromStr for Keyword {
         let s = s.trim();
         if s.starts_with('[') && s.ends_with(']') {
             Ok(Keyword {
+                criterion_id: None,
                 text: s[1..s.len() - 1].to_string(),
                 match_type: "EXACT".to_string(),
             })
         } else if s.starts_with('"') && s.ends_with('"') {
             Ok(Keyword {
+                criterion_id: None,
                 text: s[1..s.len() - 1].to_string(),
                 match_type: "PHRASE".to_string(),
             })
         } else {
             Ok(Keyword {
+                criterion_id: None,
                 text: s.to_string(),
                 match_type: "BROAD".to_string(),
             })

@@ -35,8 +35,10 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
     
-    let account_id = account_id_opt.unwrap_or_else(|| "593-530-0129".to_string());
-    println!("Found \x1b[1;32m{}\x1b[0m local campaigns for account \x1b[1;36m{}\x1b[0m.", local_campaigns.len(), account_id);
+    let account_id_str = account_id_opt.unwrap_or_else(|| "593-530-0129".to_string());
+    let account_id = crate::models::account::AccountId::new(&account_id_str)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    println!("Found \x1b[1;32m{}\x1b[0m local campaigns for account \x1b[1;36m{}\x1b[0m.", local_campaigns.len(), account_id.hyphenated());
     
     println!("\x1b[1;34mFetching remote state...\x1b[0m");
     let remote_map = fetch_remote_campaigns(&account_id).await?;

@@ -6,11 +6,11 @@ use crate::api::client::GoogleAdsClient;
 use crate::models::schema::{Campaign, AdGroup};
 use googleads_rs::google::ads::googleads::v23::services::SearchGoogleAdsRequest;
 
-pub async fn fetch_remote_campaigns(account_id: &str) -> Result<HashMap<i64, Campaign>> {
-    println!("Fetching remote state for account: {}...", account_id);
+pub async fn fetch_remote_campaigns(account_id: &crate::models::account::AccountId) -> Result<HashMap<i64, Campaign>> {
+    println!("Fetching remote state for account: {}...", account_id.hyphenated());
     
     let mut ga_client = GoogleAdsClient::new().await?;
-    ga_client.customer_id = account_id.replace("-", ""); // Ensure clean ID
+    ga_client.customer_id = account_id.unhyphenated(); 
     
     // 1. Fetch Campaigns
     let camp_query = "SELECT campaign.id, campaign.name, campaign.status FROM campaign WHERE campaign.status != 'REMOVED'";
@@ -53,7 +53,7 @@ pub async fn fetch_remote_campaigns(account_id: &str) -> Result<HashMap<i64, Cam
     }
     
     if campaigns.is_empty() {
-        println!("No campaigns found for account {}.", account_id);
+        println!("No campaigns found for account {}.", account_id.hyphenated());
         return Ok(campaigns);
     }
 
@@ -114,6 +114,7 @@ pub async fn fetch_remote_campaigns(account_id: &str) -> Result<HashMap<i64, Cam
                                 _ => "UNKNOWN",
                             };
                             let kw_obj = crate::models::schema::Keyword {
+                                criterion_id: Some(agc.criterion_id),
                                 text: kw_info.text.clone(),
                                 match_type: match_type_str.to_string(),
                             };
@@ -184,6 +185,7 @@ pub async fn fetch_remote_campaigns(account_id: &str) -> Result<HashMap<i64, Cam
                 if let Some(camp) = campaigns.get_mut(&c.id) {
                     if let Some(AssetData::SitelinkAsset(ref sl)) = asset.asset_data {
                         camp.sitelinks.push(crate::models::schema::Sitelink {
+                            asset_id: Some(asset.id),
                             link_text: sl.link_text.clone(),
                             final_urls: asset.final_urls.clone(),
                             line1: if sl.description1.is_empty() { None } else { Some(sl.description1.clone()) },
@@ -210,6 +212,7 @@ pub async fn fetch_remote_campaigns(account_id: &str) -> Result<HashMap<i64, Cam
                     if let Some(ad_group) = camp.ad_groups.iter_mut().find(|a| a.id == Some(ag.id)) {
                         if let Some(AssetData::SitelinkAsset(ref sl)) = asset.asset_data {
                             ad_group.sitelinks.push(crate::models::schema::Sitelink {
+                                asset_id: Some(asset.id),
                                 link_text: sl.link_text.clone(),
                                 final_urls: asset.final_urls.clone(),
                                 line1: if sl.description1.is_empty() { None } else { Some(sl.description1.clone()) },
@@ -244,6 +247,7 @@ pub async fn fetch_remote_campaigns(account_id: &str) -> Result<HashMap<i64, Cam
                             _ => "UNKNOWN",
                         };
                         let kw_obj = crate::models::schema::Keyword {
+                            criterion_id: Some(cc.criterion_id),
                             text: kw_info.text.clone(),
                             match_type: match_type_str.to_string(),
                         };
@@ -259,12 +263,14 @@ pub async fn fetch_remote_campaigns(account_id: &str) -> Result<HashMap<i64, Cam
     Ok(campaigns)
 }
 
-pub async fn run(account_id: &str) -> Result<()> {
-    let campaigns = fetch_remote_campaigns(account_id).await?;
+pub async fn run(account_id_str: &str) -> Result<()> {
+    let account_id = crate::models::account::AccountId::new(account_id_str)
+        .map_err(|e| anyhow::anyhow!(e))?;
+    let campaigns = fetch_remote_campaigns(&account_id).await?;
 
     // Export to YAML
     for (camp_id, campaign) in campaigns.into_iter() {
-        let filename = format!("{}_{}_campaign.yaml", account_id, camp_id);
+        let filename = format!("{}_{}_campaign.yaml", account_id.hyphenated(), camp_id);
         let mut file = File::create(&filename)?;
         
         let yaml_string = serde_yaml::to_string(&campaign)?;
