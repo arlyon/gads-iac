@@ -1,31 +1,27 @@
+use crate::engine::config::Config;
 use anyhow::{Context, Result};
-use std::env;
+use std::fmt;
 use yup_oauth2::{ServiceAccountAuthenticator, read_service_account_key};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GoogleAdsAuth {
     pub developer_token: String,
     pub access_token: String,
-    pub customer_id: String,
     pub login_customer_id: String,
 }
 
-pub async fn get_auth_token() -> Result<GoogleAdsAuth> {
-    let dev_token =
-        env::var("GOOGLE_ADS_DEVELOPER_TOKEN").context("Missing GOOGLE_ADS_DEVELOPER_TOKEN")?;
+impl fmt::Debug for GoogleAdsAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoogleAdsAuth")
+            .field("developer_token", &self.developer_token)
+            .field("access_token", &"***MASKED***")
+            .field("login_customer_id", &self.login_customer_id)
+            .finish()
+    }
+}
 
-    let customer_id = env::var("GOOGLE_PROJECT_ID")
-        .context("Missing GOOGLE_PROJECT_ID")?
-        .replace("-", "");
-
-    let login_customer_id = env::var("GOOGLE_ADS_LOGIN_CUSTOMER_ID")
-        .unwrap_or_else(|_| customer_id.clone())
-        .replace("-", "");
-
-    let creds_path = env::var("GOOGLE_APPLICATION_CREDENTIALS")
-        .context("Missing GOOGLE_APPLICATION_CREDENTIALS")?;
-
-    let secret = read_service_account_key(&creds_path)
+pub async fn get_auth_token(config: &Config) -> Result<GoogleAdsAuth> {
+    let secret = read_service_account_key(&config.creds_path)
         .await
         .context("Failed to read service account JSON key file")?;
 
@@ -38,9 +34,8 @@ pub async fn get_auth_token() -> Result<GoogleAdsAuth> {
     let access_token = token.token().unwrap_or_default().to_string();
 
     Ok(GoogleAdsAuth {
-        developer_token: dev_token,
+        developer_token: config.developer_token.clone(),
         access_token,
-        customer_id,
-        login_customer_id,
+        login_customer_id: config.login_customer_id.clone(),
     })
 }

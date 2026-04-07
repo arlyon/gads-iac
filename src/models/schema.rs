@@ -32,7 +32,8 @@ pub struct Campaign {
 
 impl Campaign {
     pub fn normalize(&mut self) {
-        self.locations.sort_by_key(|l| l.geo_target_constant.clone());
+        self.locations
+            .sort_by_key(|l| l.geo_target_constant.clone());
         self.callouts.sort_by_key(|c| c.text.clone());
         self.sitelinks.sort_by_key(|s| s.link_text.clone());
         for sitelink in &mut self.sitelinks {
@@ -67,7 +68,8 @@ pub struct AdGroup {
 
 impl AdGroup {
     pub fn normalize(&mut self) {
-        self.ads.sort_by_key(|a| a.headlines.first().cloned().unwrap_or_default());
+        self.ads
+            .sort_by_key(|a| a.headlines.first().cloned().unwrap_or_default());
         for ad in &mut self.ads {
             ad.normalize();
         }

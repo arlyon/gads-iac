@@ -27,9 +27,13 @@ pub fn compute_diff(local: &Campaign, remote: &Campaign) -> Vec<String> {
 
     use std::collections::HashMap;
     let mut l_counts = HashMap::new();
-    for line in &l_lines { *l_counts.entry(line).or_insert(0) += 1; }
+    for line in &l_lines {
+        *l_counts.entry(line).or_insert(0) += 1;
+    }
     let mut r_counts = HashMap::new();
-    for line in &r_lines { *r_counts.entry(line).or_insert(0) += 1; }
+    for line in &r_lines {
+        *r_counts.entry(line).or_insert(0) += 1;
+    }
 
     let mut added = Vec::new();
     let mut r_counts_temp = r_counts.clone();

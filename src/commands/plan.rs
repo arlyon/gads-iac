@@ -1,12 +1,14 @@
 use crate::commands::import::fetch_remote_campaigns;
+use crate::engine::config::Config;
 use crate::engine::diff::compute_diff;
 use crate::models::schema::Campaign;
 use anyhow::Result;
+use colored::Colorize;
 use std::fs;
 use std::fs::File;
 
-pub async fn run() -> Result<()> {
-    println!("\x1b[1;34mLoading local YAML files...\x1b[0m");
+pub async fn run(config: &Config) -> Result<()> {
+    println!("{}", "Loading local YAML files...".blue());
 
     let mut local_campaigns: Vec<Campaign> = Vec::new();
     let mut account_id_opt = None;
@@ -30,7 +32,10 @@ pub async fn run() -> Result<()> {
     }
 
     if local_campaigns.is_empty() {
-        println!("\x1b[33mNo local YAML files found. Try running `import` first.\x1b[0m");
+        println!(
+            "{}",
+            "No local YAML files found. Try running `import` first.".yellow()
+        );
         return Ok(());
     }
 
@@ -38,15 +43,20 @@ pub async fn run() -> Result<()> {
     let account_id =
         crate::models::account::AccountId::new(&account_id_str).map_err(|e| anyhow::anyhow!(e))?;
     println!(
-        "Found \x1b[1;32m{}\x1b[0m local campaigns for account \x1b[1;36m{}\x1b[0m.",
-        local_campaigns.len(),
-        account_id.hyphenated()
+        "Found {} local campaigns for account {}.",
+        local_campaigns.len().to_string().green(),
+        account_id.hyphenated().cyan()
     );
 
-    println!("\x1b[1;34mFetching remote state...\x1b[0m");
-    let remote_map = fetch_remote_campaigns(&account_id).await?;
+    println!("{}", "Fetching remote state...".blue());
+    let remote_map = fetch_remote_campaigns(&account_id, config).await?;
 
-    println!("\n\x1b[1;36m================ GENERATING PLAN ================\x1b[0m\n");
+    println!(
+        "\n{}",
+        "================ GENERATING PLAN ================"
+            .cyan()
+            .bold()
+    );
     let mut clean = true;
     for local in &local_campaigns {
         if let Some(camp_id) = local.id {
@@ -55,16 +65,18 @@ pub async fn run() -> Result<()> {
                 if !diffs.is_empty() {
                     clean = false;
                     println!(
-                        "\x1b[1;33m~ Campaign {} ({}) has drifted:\x1b[0m",
-                        local.name, camp_id
+                        "{} Campaign {} ({}) has drifted:",
+                        "~".yellow(),
+                        local.name.bold(),
+                        camp_id
                     );
                     for diff in diffs {
                         if diff.starts_with('+') {
-                            println!("\x1b[32m  {}\x1b[0m", diff);
+                            println!("{}", diff.green());
                         } else if diff.starts_with('-') {
-                            println!("\x1b[31m  {}\x1b[0m", diff);
+                            println!("{}", diff.red());
                         } else if diff.starts_with('~') {
-                            println!("\x1b[33m  {}\x1b[0m", diff);
+                            println!("{}", diff.yellow());
                         } else {
                             println!("  {}", diff);
                         }
@@ -74,34 +86,39 @@ pub async fn run() -> Result<()> {
             } else {
                 clean = false;
                 println!(
-                    "\x1b[1;32m+ Campaign {} ({}) will be CREATED\x1b[0m",
-                    local.name, camp_id
+                    "{} Campaign {} ({}) will be {}",
+                    "+".green(),
+                    local.name.bold(),
+                    camp_id,
+                    "CREATED".green()
                 );
             }
         } else {
             clean = false;
             println!(
-                "\x1b[1;32m+ Campaign {} (NEW) will be CREATED\x1b[0m",
-                local.name
+                "{} Campaign {} (NEW) will be {}",
+                "+".green(),
+                local.name.bold(),
+                "CREATED".green()
             );
         }
     }
 
-    for (remote_id, remote) in &remote_map {
-        if !local_campaigns.iter().any(|c| c.id == Some(*remote_id)) {
-            clean = false;
-            println!(
-                "\x1b[1;31m- Campaign {} ({}) will be DESTROYED (exists in remote but not local)\x1b[0m",
-                remote.name, remote_id
-            );
-        }
-    }
+    // Removed destructive DESTROY logic as per requirements.
 
     if clean {
-        println!("\x1b[1;32mNo drift detected! Local infrastructure matches remote state.\x1b[0m");
+        println!(
+            "{}",
+            "No drift detected! Local infrastructure matches remote state.".green()
+        );
     }
 
-    println!("\n\x1b[1;36m=================================================\x1b[0m");
+    println!(
+        "\n{}",
+        "================================================="
+            .cyan()
+            .bold()
+    );
 
     Ok(())
 }

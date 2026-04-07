@@ -1,11 +1,14 @@
 use crate::api::auth::get_auth_token;
+use crate::engine::config::Config;
 use anyhow::Result;
 use tonic::codegen::InterceptedService;
 use tonic::transport::{Channel, ClientTlsConfig};
 use tonic::{Request, Status, metadata::MetadataValue};
 
-// Assuming v13 based on googleads-rs v0.13.0 cargo versions
-pub use googleads_rs::google::ads::googleads::v23::services::google_ads_service_client::GoogleAdsServiceClient;
+// Centralized API versioning
+pub use googleads_rs::google::ads::googleads::v23 as ads;
+
+pub use ads::services::google_ads_service_client::GoogleAdsServiceClient;
 
 pub type GAdsClient = GoogleAdsServiceClient<InterceptedService<Channel, GAdsInterceptor>>;
 
@@ -36,8 +39,8 @@ pub struct GoogleAdsClient {
 }
 
 impl GoogleAdsClient {
-    pub async fn new() -> Result<Self> {
-        let auth = get_auth_token().await?;
+    pub async fn new(config: &Config) -> Result<Self> {
+        let auth = get_auth_token(config).await?;
 
         // Ensure that tonic rustls is correctly setup with native roots
         let endpoint = Channel::from_static("https://googleads.googleapis.com")
@@ -54,8 +57,6 @@ impl GoogleAdsClient {
 
         let client = GoogleAdsServiceClient::with_interceptor(channel, interceptor);
 
-        Ok(Self {
-            client,
-        })
+        Ok(Self { client })
     }
 }

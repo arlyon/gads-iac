@@ -1,14 +1,17 @@
+use crate::api::client::{GoogleAdsClient, ads};
 use crate::commands::import::fetch_remote_campaigns;
+use crate::engine::config::Config;
 use crate::engine::diff::compute_diff;
 use crate::models::schema::Campaign;
 use anyhow::Result;
+use colored::Colorize;
 use std::fs;
 use std::fs::File;
 use std::io::{self, Write};
 use tracing::{debug, trace};
 
-pub async fn run() -> Result<()> {
-    println!("\x1b[1;34mLoading local YAML files...\x1b[0m");
+pub async fn run(config: &Config) -> Result<()> {
+    println!("{}", "Loading local YAML files...".blue());
 
     let mut local_campaigns: Vec<Campaign> = Vec::new();
     let mut account_id_opt = None;
@@ -33,7 +36,10 @@ pub async fn run() -> Result<()> {
     }
 
     if local_campaigns.is_empty() {
-        println!("\x1b[33mNo local YAML files found. Try running `import` first.\x1b[0m");
+        println!(
+            "{}",
+            "No local YAML files found. Try running `import` first.".yellow()
+        );
         return Ok(());
     }
     let account_id_str = account_id_opt.unwrap_or_else(|| "593-530-0129".to_string());
@@ -41,15 +47,14 @@ pub async fn run() -> Result<()> {
         crate::models::account::AccountId::new(&account_id_str).map_err(|e| anyhow::anyhow!(e))?;
 
     println!(
-        "Found \x1b[1;32m{}\x1b[0m local campaigns for account \x1b[1;36m{}\x1b[0m.",
-        local_campaigns.len(),
-        account_id.hyphenated()
+        "Found {} local campaigns for account {}.",
+        local_campaigns.len().to_string().green(),
+        account_id.hyphenated().cyan()
     );
     debug!("Total campaigns loaded: {}", local_campaigns.len());
 
-    println!("DEBUG: [apply] About to call fetch_remote_campaigns...");
-    let mut remote_map = fetch_remote_campaigns(&account_id).await?;
-    println!("DEBUG: [apply] fetch_remote_campaigns returned.");
+    println!("{}", "Fetching remote state...".blue());
+    let mut remote_map = fetch_remote_campaigns(&account_id, config).await?;
 
     let mut clean = true;
 
@@ -62,16 +67,18 @@ pub async fn run() -> Result<()> {
                 if !diffs.is_empty() {
                     clean = false;
                     println!(
-                        "\x1b[1;33m~ Campaign {} ({}) has drifted:\x1b[0m",
-                        local.name, camp_id
+                        "{} Campaign {} ({}) has drifted:",
+                        "~".yellow(),
+                        local.name.bold(),
+                        camp_id
                     );
                     for diff in diffs {
                         if diff.starts_with('+') {
-                            println!("\x1b[32m  {}\x1b[0m", diff);
+                            println!("{}", diff.green());
                         } else if diff.starts_with('-') {
-                            println!("\x1b[31m  {}\x1b[0m", diff);
+                            println!("{}", diff.red());
                         } else if diff.starts_with('~') {
-                            println!("\x1b[33m  {}\x1b[0m", diff);
+                            println!("{}", diff.yellow());
                         } else {
                             println!("  {}", diff);
                         }
@@ -81,32 +88,30 @@ pub async fn run() -> Result<()> {
             } else {
                 clean = false;
                 println!(
-                    "\x1b[1;32m+ Campaign {} ({}) will be CREATED\x1b[0m",
-                    local.name, camp_id
+                    "{} Campaign {} ({}) will be {}",
+                    "+".green(),
+                    local.name.bold(),
+                    camp_id,
+                    "CREATED".green()
                 );
             }
         } else {
             clean = false;
             println!(
-                "\x1b[1;32m+ Campaign {} (NEW) will be CREATED\x1b[0m",
-                local.name
+                "{} Campaign {} (NEW) will be {}",
+                "+".green(),
+                local.name.bold(),
+                "CREATED".green()
             );
         }
     }
 
-    for (remote_id, remote) in &remote_map {
-        if !local_campaigns.iter().any(|c| c.id == Some(*remote_id)) {
-            clean = false;
-            println!(
-                "\x1b[1;31m- Campaign {} ({}) will be DESTROYED (exists in remote but not local)\x1b[0m",
-                remote.name, remote_id
-            );
-        }
-    }
+    // Removed destructive DESTROY logic as per requirements.
 
     if clean {
         println!(
-            "\x1b[1;32mNo drift detected. Local state matches remote. Nothing to apply.\x1b[0m"
+            "{}",
+            "No drift detected. Local state matches remote. Nothing to apply.".green()
         );
         return Ok(());
     }
@@ -114,7 +119,8 @@ pub async fn run() -> Result<()> {
     // Check for CI environment
     if std::env::var("CI").is_ok() {
         eprintln!(
-            "\x1b[1;31mERROR: CI environment detected and drift was found. Aborting to prevent un-interactive overwrites.\x1b[0m"
+            "{}",
+            "ERROR: CI environment detected and drift was found. Aborting to prevent un-interactive overwrites.".red().bold()
         );
         std::process::exit(1);
     }
@@ -128,18 +134,18 @@ pub async fn run() -> Result<()> {
         operations.append(&mut ops);
     }
 
-    // Connect MutateGoogleAdsRequest field-mask updates
     if operations.is_empty() {
         println!(
-            "\x1b[1;33mNo structural mutations could be built for the detected drift. (Only Campaign name/status are currently mapped in MVP).\x1b[0m"
+            "{}",
+            "No structural mutations could be built for the detected drift. (Only Campaign name/status are currently mapped in MVP).".yellow()
         );
         return Ok(());
     }
 
     // Prompt for confirmation locally
     print!(
-        "\x1b[1;33mDo you want to apply these {} mapped mutation(s) to the live API? (y/N): \x1b[0m",
-        operations.len()
+        "Do you want to apply these {} mapped mutation(s) to the live API? (y/N): ",
+        operations.len().to_string().yellow()
     );
     io::stdout().flush()?;
 
@@ -151,12 +157,15 @@ pub async fn run() -> Result<()> {
         return Ok(());
     }
 
-    println!("\n\x1b[1;36mApplying changes to remote state...\x1b[0m");
-    println!("Executing {} mutation(s) concurrently...", operations.len());
+    println!("\n{}", "Applying changes to remote state...".cyan().bold());
+    println!(
+        "Executing {} mutation(s) concurrently...",
+        operations.len().to_string().cyan()
+    );
 
-    let mut client = crate::api::client::GoogleAdsClient::new().await?;
+    let mut client = GoogleAdsClient::new(config).await?;
 
-    let request = googleads_rs::google::ads::googleads::v23::services::MutateGoogleAdsRequest {
+    let request = ads::services::MutateGoogleAdsRequest {
         customer_id: account_id.unhyphenated(),
         mutate_operations: operations.clone(),
         partial_failure: true,
@@ -168,7 +177,8 @@ pub async fn run() -> Result<()> {
         Ok(res) => res,
         Err(status) => {
             eprintln!(
-                "\x1b[1;31mFatal API Error during dispatch: {:?}\x1b[0m",
+                "{} Fatal API Error during dispatch: {:?}",
+                "✘".red(),
                 status
             );
             return Ok(());
@@ -179,10 +189,10 @@ pub async fn run() -> Result<()> {
 
     let mut aggregator = crate::engine::errors::ErrorAggregator::new();
     if let Some(status) = inner.partial_failure_error {
-        println!("\x1b[1;31mPartial Failures Detected!\x1b[0m");
+        println!("{}", "Partial Failures Detected!".red().bold());
         aggregator.parse_partial_failures(&status.details);
         for error in &aggregator.errors {
-            println!("\x1b[31m  - {}\x1b[0m", error);
+            println!("  {} {}", "-".red(), error);
         }
     }
 
@@ -196,12 +206,18 @@ pub async fn run() -> Result<()> {
     let failures = total.saturating_sub(successes);
 
     println!(
-        "\x1b[1;32mApply Summary: {} attempted, {} succeeded, {} failed.\x1b[0m",
-        total, successes, failures
+        "\n{} Apply Summary: {} attempted, {} succeeded, {} failed.",
+        "ℹ".blue().bold(),
+        total,
+        successes.to_string().green(),
+        failures.to_string().red()
     );
 
     if failures > 0 {
-        return Err(anyhow::anyhow!("Apply completed with {} partial failures.", failures));
+        return Err(anyhow::anyhow!(
+            "Apply completed with {} partial failures.",
+            failures
+        ));
     }
 
     Ok(())

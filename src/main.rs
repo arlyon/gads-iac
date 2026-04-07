@@ -17,12 +17,15 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     runtime.block_on(async move {
+        let config = engine::config::Config::from_env()?;
         let cli_parsed = cli::Cli::parse();
 
         match &cli_parsed.command {
-            cli::Commands::Import { account_id } => commands::import::run(account_id).await?,
-            cli::Commands::Plan => commands::plan::run().await?,
-            cli::Commands::Apply => commands::apply::run().await?,
+            cli::Commands::Import { account_id } => {
+                commands::import::run(account_id, &config).await?
+            }
+            cli::Commands::Plan => commands::plan::run(&config).await?,
+            cli::Commands::Apply => commands::apply::run(&config).await?,
         }
 
         Ok(())

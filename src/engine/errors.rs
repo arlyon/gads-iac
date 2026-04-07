@@ -59,10 +59,10 @@ impl ErrorAggregator {
     pub fn parse_partial_failures(&mut self, details: &[prost_types::Any]) {
         for any in details {
             // Check if it's a GoogleAdsFailure. Different versions might have different URLs.
-            if any.type_url.contains("GoogleAdsFailure") {
-                if let Ok(failure) = GoogleAdsFailure::decode(&any.value[..]) {
-                    self.add_failure(failure);
-                }
+            if any.type_url.contains("GoogleAdsFailure")
+                && let Ok(failure) = GoogleAdsFailure::decode(&any.value[..])
+            {
+                self.add_failure(failure);
             }
         }
     }
