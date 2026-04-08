@@ -17,8 +17,13 @@ fn main() -> anyhow::Result<()> {
         .build()?;
 
     runtime.block_on(async move {
-        let config = engine::config::Config::from_env()?;
         let cli_parsed = cli::Cli::parse();
+
+        if let cli::Commands::ExportSchema = &cli_parsed.command {
+            return commands::export_schema::run();
+        }
+
+        let config = engine::config::Config::from_env()?;
 
         match &cli_parsed.command {
             cli::Commands::Import { account_id } => {
@@ -26,6 +31,7 @@ fn main() -> anyhow::Result<()> {
             }
             cli::Commands::Plan => commands::plan::run(&config).await?,
             cli::Commands::Apply => commands::apply::run(&config).await?,
+            cli::Commands::ExportSchema => unreachable!(),
         }
 
         Ok(())

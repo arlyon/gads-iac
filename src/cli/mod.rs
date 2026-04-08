@@ -18,4 +18,6 @@ pub enum Commands {
     Plan,
     /// Execute the differences, mutating the remote state to match the local files, detecting out-of-band drift.
     Apply,
+    /// Export the JSON Schema for the campaign YAML format to gads-schema.json.
+    ExportSchema,
 }
