@@ -1,10 +1,32 @@
-use crate::models::schema::Campaign;
+use crate::models::schema::{Campaign, Keyword};
+use googleads_rs::google::ads::googleads::v23::common::KeywordInfo;
+use googleads_rs::google::ads::googleads::v23::enums::ad_group_status_enum::AdGroupStatus;
 use googleads_rs::google::ads::googleads::v23::enums::campaign_status_enum::CampaignStatus;
+use googleads_rs::google::ads::googleads::v23::enums::keyword_match_type_enum::KeywordMatchType;
+use googleads_rs::google::ads::googleads::v23::resources::campaign_criterion;
+use googleads_rs::google::ads::googleads::v23::resources::ad_group_criterion;
+use googleads_rs::google::ads::googleads::v23::resources::AdGroup as RemoteAdGroup;
+use googleads_rs::google::ads::googleads::v23::resources::AdGroupCriterion;
 use googleads_rs::google::ads::googleads::v23::resources::Campaign as RemoteCampaign;
+use googleads_rs::google::ads::googleads::v23::resources::CampaignCriterion;
+use googleads_rs::google::ads::googleads::v23::services::ad_group_criterion_operation;
+use googleads_rs::google::ads::googleads::v23::services::campaign_criterion_operation;
+use googleads_rs::google::ads::googleads::v23::services::AdGroupCriterionOperation;
+use googleads_rs::google::ads::googleads::v23::services::AdGroupOperation;
+use googleads_rs::google::ads::googleads::v23::services::CampaignCriterionOperation;
 use googleads_rs::google::ads::googleads::v23::services::CampaignOperation;
 use googleads_rs::google::ads::googleads::v23::services::MutateOperation;
 use prost_types::FieldMask;
+use std::collections::HashSet;
 use tracing::{debug, trace};
+
+fn keyword_match_type(kw: &Keyword) -> i32 {
+    match kw.match_type.as_str() {
+        "EXACT" => KeywordMatchType::Exact as i32,
+        "PHRASE" => KeywordMatchType::Phrase as i32,
+        _ => KeywordMatchType::Broad as i32,
+    }
+}
 
 /// Computes the difference between local YAML definition and remote Google Ads API state.
 pub fn compute_diff(local: &Campaign, remote: &Campaign) -> Vec<String> {
@@ -65,6 +87,69 @@ pub fn compute_diff(local: &Campaign, remote: &Campaign) -> Vec<String> {
     }
 
     differences
+}
+
+/// Diffs a list of ad group keywords (positive or negative) and appends removes then creates
+/// so each changed keyword forms an atomic pair within the batch.
+fn diff_ad_group_keywords(
+    operations: &mut Vec<MutateOperation>,
+    customer_id: &str,
+    ag_id: i64,
+    local_kws: &[Keyword],
+    remote_kws: &[Keyword],
+    negative: bool,
+) {
+    let remote_set: HashSet<String> = remote_kws.iter().map(|k| k.to_string()).collect();
+    let local_set: HashSet<String> = local_kws.iter().map(|k| k.to_string()).collect();
+
+    // Removes first.
+    for kw in remote_kws {
+        if !local_set.contains(&kw.to_string()) {
+            if let Some(criterion_id) = kw.criterion_id {
+                debug!(
+                    "Removing ad group {} keyword '{}'",
+                    if negative { "negative" } else { "positive" },
+                    kw
+                );
+                let op = AdGroupCriterionOperation {
+                    operation: Some(ad_group_criterion_operation::Operation::Remove(format!(
+                        "customers/{}/adGroupCriteria/{}~{}",
+                        customer_id, ag_id, criterion_id
+                    ))),
+                    ..Default::default()
+                };
+                operations.push(MutateOperation {
+                    operation: Some(googleads_rs::google::ads::googleads::v23::services::mutate_operation::Operation::AdGroupCriterionOperation(op)),
+                });
+            }
+        }
+    }
+
+    // Creates second.
+    for kw in local_kws {
+        if !remote_set.contains(&kw.to_string()) {
+            debug!(
+                "Adding ad group {} keyword '{}'",
+                if negative { "negative" } else { "positive" },
+                kw
+            );
+            let op = AdGroupCriterionOperation {
+                operation: Some(ad_group_criterion_operation::Operation::Create(AdGroupCriterion {
+                    ad_group: format!("customers/{}/adGroups/{}", customer_id, ag_id),
+                    negative,
+                    criterion: Some(ad_group_criterion::Criterion::Keyword(KeywordInfo {
+                        text: kw.text.clone(),
+                        match_type: keyword_match_type(kw),
+                    })),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            };
+            operations.push(MutateOperation {
+                operation: Some(googleads_rs::google::ads::googleads::v23::services::mutate_operation::Operation::AdGroupCriterionOperation(op)),
+            });
+        }
+    }
 }
 
 /// Translates structural differences into a set of precise gRPC update operations.
@@ -209,6 +294,119 @@ pub fn build_mutations(
                     });
                 }
             }
+        }
+
+        // Campaign negative keywords — removes before creates so the pair is atomic in the batch.
+        let campaign_id = local.id.unwrap_or(0);
+        let remote_neg: HashSet<String> = r.negative_keywords.iter().map(|k| k.to_string()).collect();
+        let local_neg: HashSet<String> = local.negative_keywords.iter().map(|k| k.to_string()).collect();
+
+        for kw in &r.negative_keywords {
+            if !local_neg.contains(&kw.to_string()) {
+                if let Some(criterion_id) = kw.criterion_id {
+                    debug!("Removing campaign negative keyword '{}'", kw);
+                    let op = CampaignCriterionOperation {
+                        operation: Some(campaign_criterion_operation::Operation::Remove(format!(
+                            "customers/{}/campaignCriteria/{}~{}",
+                            clean_customer_id, campaign_id, criterion_id
+                        ))),
+                        ..Default::default()
+                    };
+                    operations.push(MutateOperation {
+                        operation: Some(googleads_rs::google::ads::googleads::v23::services::mutate_operation::Operation::CampaignCriterionOperation(op)),
+                    });
+                }
+            }
+        }
+        for kw in &local.negative_keywords {
+            if !remote_neg.contains(&kw.to_string()) {
+                debug!("Adding campaign negative keyword '{}'", kw);
+                let op = CampaignCriterionOperation {
+                    operation: Some(campaign_criterion_operation::Operation::Create(CampaignCriterion {
+                        campaign: format!("customers/{}/campaigns/{}", clean_customer_id, campaign_id),
+                        negative: true,
+                        criterion: Some(campaign_criterion::Criterion::Keyword(KeywordInfo {
+                            text: kw.text.clone(),
+                            match_type: keyword_match_type(kw),
+                        })),
+                        ..Default::default()
+                    })),
+                    ..Default::default()
+                };
+                operations.push(MutateOperation {
+                    operation: Some(googleads_rs::google::ads::googleads::v23::services::mutate_operation::Operation::CampaignCriterionOperation(op)),
+                });
+            }
+        }
+
+        // Ad group diffing — match by ID, then diff keywords and status/name.
+        let remote_ag_map: std::collections::HashMap<i64, &crate::models::schema::AdGroup> = r
+            .ad_groups
+            .iter()
+            .filter_map(|ag| ag.id.map(|id| (id, ag)))
+            .collect();
+
+        for l_ag in &local.ad_groups {
+            let ag_id = match l_ag.id {
+                Some(id) => id,
+                None => continue,
+            };
+            let r_ag = match remote_ag_map.get(&ag_id) {
+                Some(ag) => ag,
+                None => continue,
+            };
+
+            // Ad group field updates (name, status).
+            let mut ag_mask = FieldMask::default();
+            let mut ag_has_changes = false;
+            let mut remote_ag = RemoteAdGroup {
+                resource_name: format!("customers/{}/adGroups/{}", clean_customer_id, ag_id),
+                ..Default::default()
+            };
+            if l_ag.name != r_ag.name {
+                remote_ag.name = l_ag.name.clone();
+                ag_mask.paths.push("name".to_string());
+                ag_has_changes = true;
+            }
+            if l_ag.status != r_ag.status {
+                remote_ag.status = match l_ag.status.as_str() {
+                    "ENABLED" => AdGroupStatus::Enabled as i32,
+                    "PAUSED" => AdGroupStatus::Paused as i32,
+                    "REMOVED" => AdGroupStatus::Removed as i32,
+                    _ => AdGroupStatus::Unspecified as i32,
+                };
+                ag_mask.paths.push("status".to_string());
+                ag_has_changes = true;
+            }
+            if ag_has_changes {
+                debug!("Ad group '{}' field drift detected.", l_ag.name);
+                let op = AdGroupOperation {
+                    update_mask: Some(ag_mask),
+                    operation: Some(googleads_rs::google::ads::googleads::v23::services::ad_group_operation::Operation::Update(remote_ag)),
+                };
+                operations.push(MutateOperation {
+                    operation: Some(googleads_rs::google::ads::googleads::v23::services::mutate_operation::Operation::AdGroupOperation(op)),
+                });
+            }
+
+            // Ad group keywords — diff positive and negative together using the same
+            // removes-before-creates ordering so each changed keyword is an atomic pair.
+            diff_ad_group_keywords(
+                &mut operations,
+                &clean_customer_id,
+                ag_id,
+                &l_ag.keywords,
+                &r_ag.keywords,
+                false,
+            );
+            diff_ad_group_keywords(
+                &mut operations,
+                &clean_customer_id,
+                ag_id,
+                &l_ag.negative_keywords,
+                &r_ag.negative_keywords,
+                true,
+            );
         }
     } else {
         // Create handling (simplified for this scope)
