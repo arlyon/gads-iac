@@ -2,6 +2,7 @@
 name = "gads-iac"
 version = "0.2.0"
 edition = "2024"
+repository = "https://github.com/arlyon/gads-iac"
 
 [dependencies]
 anyhow = "1.0.102"
@@ -19,3 +20,8 @@ yup-oauth2 = "12.1.2"
 colored = "2.1.0"
 schemars = { version = "0.8", features = ["derive"] }
 serde_json = "1.0.149"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
