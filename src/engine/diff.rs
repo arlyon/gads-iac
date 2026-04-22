@@ -166,6 +166,10 @@ pub fn compute_diff(local: &Campaign, remote: &Campaign) -> Vec<String> {
     let mut remote_norm = remote.clone();
     remote_norm.normalize();
 
+    if local_norm.bidding_strategy.is_none() {
+        remote_norm.bidding_strategy = None;
+    }
+
     let local_value = serde_yaml::to_value(&local_norm).unwrap_or(Value::Null);
     let remote_value = serde_yaml::to_value(&remote_norm).unwrap_or(Value::Null);
 
@@ -1583,6 +1587,66 @@ mod tests {
         };
         let update_mask = op.update_mask.as_ref().expect("update mask");
         assert_eq!(update_mask.paths, vec!["manual_cpc"]);
+    }
+
+    #[test]
+    fn omitted_bidding_strategy_is_unmanaged() {
+        let local = test_campaign();
+        let mut remote = test_campaign();
+        remote.bidding_strategy = Some(BiddingStrategy::MaximizeConversions {
+            target_cpa: Some(50.0),
+        });
+        let account_id = AccountId::new("1234567890").unwrap();
+
+        assert!(compute_diff(&local, &remote).is_empty());
+        assert!(build_mutations(&local, Some(&remote), &account_id).is_empty());
+    }
+
+    #[test]
+    fn build_mutations_removes_remote_campaign_assets_missing_locally() {
+        let local = test_campaign();
+        let mut remote = test_campaign();
+        remote.callouts = vec![crate::models::schema::Callout {
+            asset_id: Some(111),
+            text: "Satisfaction Guaranteed".to_string(),
+        }];
+        remote.sitelinks = vec![crate::models::schema::Sitelink {
+            asset_id: Some(222),
+            link_text: "Request Callback".to_string(),
+            final_urls: vec!["https://example.com/".to_string()],
+            line1: Some("Prefer to speak to a human?".to_string()),
+            line2: Some("We'll call you back in minutes.".to_string()),
+        }];
+        let account_id = AccountId::new("1234567890").unwrap();
+
+        let operations = build_mutations(&local, Some(&remote), &account_id);
+
+        assert_eq!(operations.len(), 2);
+        let Some(ads::services::mutate_operation::Operation::CampaignAssetOperation(op)) =
+            &operations[0].operation
+        else {
+            panic!("expected campaign asset operation");
+        };
+        assert_eq!(
+            op.operation,
+            Some(campaign_asset_operation::Operation::Remove(format!(
+                "customers/1234567890/campaignAssets/123~111~{}",
+                AssetFieldType::Callout as i32
+            )))
+        );
+
+        let Some(ads::services::mutate_operation::Operation::CampaignAssetOperation(op)) =
+            &operations[1].operation
+        else {
+            panic!("expected campaign asset operation");
+        };
+        assert_eq!(
+            op.operation,
+            Some(campaign_asset_operation::Operation::Remove(format!(
+                "customers/1234567890/campaignAssets/123~222~{}",
+                AssetFieldType::Sitelink as i32
+            )))
+        );
     }
 
     #[test]
