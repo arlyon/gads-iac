@@ -1,5 +1,5 @@
 use miette::{Diagnostic, NamedSource, SourceSpan};
-use prost::Message;
+use prost::{Enumeration, Message};
 use std::collections::BTreeSet;
 use std::fmt;
 use thiserror::Error;
@@ -27,8 +27,29 @@ pub struct GoogleAdsError {
 
 #[derive(Clone, PartialEq, Message)]
 pub struct ErrorCode {
-    // We just need the struct to exist for decoding to continue,
-    // we don't need to parse the oneof unless we want specific codes.
+    #[prost(oneof = "error_code::ErrorCode", tags = "10")]
+    pub error_code: Option<error_code::ErrorCode>,
+}
+
+pub mod error_code {
+    use super::StringLengthError;
+    use prost::Oneof;
+
+    #[derive(Clone, PartialEq, Oneof)]
+    pub enum ErrorCode {
+        #[prost(enumeration = "StringLengthError", tag = "10")]
+        StringLengthError(i32),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Enumeration)]
+#[repr(i32)]
+pub enum StringLengthError {
+    Unspecified = 0,
+    Unknown = 1,
+    Empty = 4,
+    TooShort = 2,
+    TooLong = 3,
 }
 
 #[derive(Clone, PartialEq, Message)]
@@ -55,6 +76,13 @@ pub struct GoogleAdsFailureItem {
     pub message: String,
     pub location: Option<String>,
     pub operation_index: Option<usize>,
+    pub length_limit: Option<FieldLengthLimit>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct FieldLengthLimit {
+    pub field: &'static str,
+    pub max: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -67,14 +95,29 @@ pub struct OperationSourceContext {
 
 impl fmt::Display for GoogleAdsFailureItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match (&self.operation_index, &self.location) {
-            (Some(index), Some(location)) => {
-                write!(f, "operation {}: {} (at {})", index, self.message, location)
-            }
-            (Some(index), None) => write!(f, "operation {}: {}", index, self.message),
-            (None, Some(location)) => write!(f, "{} (at {})", self.message, location),
-            (None, None) => write!(f, "{}", self.message),
+        write!(f, "{}", self.display_message())
+    }
+}
+
+impl GoogleAdsFailureItem {
+    fn display_message(&self) -> String {
+        if let Some(limit) = self.length_limit {
+            format!(
+                "{}: maximum {} characters for {}",
+                self.message.trim_end_matches('.'),
+                limit.max,
+                limit.field
+            )
+        } else {
+            self.message.clone()
         }
+    }
+
+    fn is_dependent_asset_link_failure(&self) -> bool {
+        self.message == "Resource was not found."
+            && self.location.as_deref().is_some_and(|location| {
+                location.ends_with(".campaign_asset_operation.create.asset")
+            })
     }
 }
 
@@ -91,10 +134,11 @@ pub struct GoogleAdsOperationDiagnostic {
 }
 
 impl GoogleAdsOperationDiagnostic {
-    fn from_failure(
-        value: &GoogleAdsFailureItem,
+    fn from_failures(
+        values: &[&GoogleAdsFailureItem],
         source_context: Option<&OperationSourceContext>,
     ) -> Self {
+        let value = values[0];
         let refined_span = source_context
             .and_then(|context| {
                 value.location.as_deref().and_then(|location| {
@@ -117,9 +161,11 @@ impl GoogleAdsOperationDiagnostic {
                     .clone()
                     .unwrap_or_else(|| value.message.clone())
             });
+        let label =
+            label_with_length_limit(label, value.length_limit, &source_context, refined_span);
 
         Self {
-            message: value.to_string(),
+            message: grouped_failure_message(values, source_context),
             source_code,
             span: refined_span,
             label,
@@ -127,7 +173,46 @@ impl GoogleAdsOperationDiagnostic {
     }
 }
 
+fn grouped_failure_message(
+    values: &[&GoogleAdsFailureItem],
+    _source_context: Option<&OperationSourceContext>,
+) -> String {
+    values[0].display_message()
+}
+
+fn label_with_length_limit(
+    label: String,
+    limit: Option<FieldLengthLimit>,
+    source_context: &Option<&OperationSourceContext>,
+    span: Option<SourceSpan>,
+) -> String {
+    let Some(limit) = limit else {
+        return label;
+    };
+
+    let current = source_context
+        .and_then(|context| span_text(&context.source, span))
+        .map(|text| text.chars().count());
+
+    if let Some(current) = current {
+        format!("{label} (max {} characters, got {current})", limit.max)
+    } else {
+        format!("{label} (max {} characters)", limit.max)
+    }
+}
+
+fn span_text(source: &str, span: Option<SourceSpan>) -> Option<&str> {
+    let span = span?;
+    let start = span.offset();
+    let end = start.checked_add(span.len())?;
+    source.get(start..end)
+}
+
 fn yaml_span_for_google_ads_location(source: &str, location: &str) -> Option<SourceSpan> {
+    if let Some(index) = indexed_path_component(location, "headlines") {
+        return nth_yaml_sequence_value_span(source, "headlines", index);
+    }
+
     if let Some(index) = indexed_path_component(location, "descriptions") {
         return nth_yaml_sequence_value_span(source, "descriptions", index);
     }
@@ -247,6 +332,15 @@ impl ErrorAggregator {
 
     pub fn add_failure(&mut self, failure: GoogleAdsFailure) {
         for err in failure.errors {
+            let is_too_long = matches!(
+                err.error_code
+                    .as_ref()
+                    .and_then(|code| code.error_code.as_ref()),
+                Some(error_code::ErrorCode::StringLengthError(
+                    value
+                )) if StringLengthError::try_from(*value) == Ok(StringLengthError::TooLong)
+            ) || err.message == "Too long.";
+
             let (location, operation_index) = if let Some(loc) = err.location {
                 let operation_index = loc
                     .field_path_elements
@@ -275,6 +369,9 @@ impl ErrorAggregator {
 
             self.errors.push(GoogleAdsFailureItem {
                 message: err.message,
+                length_limit: location
+                    .as_deref()
+                    .and_then(|location| field_length_limit(location, is_too_long)),
                 location,
                 operation_index,
             });
@@ -311,18 +408,143 @@ impl ErrorAggregator {
             attempted,
             succeeded,
             failed,
-            errors: self
-                .errors
-                .iter()
-                .map(|error| {
-                    let source_context = error
-                        .operation_index
-                        .and_then(|index| operation_sources.get(index));
-                    GoogleAdsOperationDiagnostic::from_failure(error, source_context)
-                })
-                .collect(),
+            errors: grouped_operation_diagnostics(&self.errors, operation_sources),
         }
     }
+}
+
+fn grouped_operation_diagnostics(
+    errors: &[GoogleAdsFailureItem],
+    operation_sources: &[OperationSourceContext],
+) -> Vec<GoogleAdsOperationDiagnostic> {
+    let mut groups: Vec<(String, Vec<&GoogleAdsFailureItem>)> = Vec::new();
+
+    for error in errors {
+        if error.is_dependent_asset_link_failure()
+            && error
+                .operation_index
+                .and_then(|index| operation_sources.get(index))
+                .is_some_and(|context| context.label.starts_with("this asset link depends"))
+        {
+            continue;
+        }
+
+        let key = diagnostic_group_key(error);
+        if let Some((_, values)) = groups.iter_mut().find(|(existing, _)| existing == &key) {
+            values.push(error);
+        } else {
+            groups.push((key, vec![error]));
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(_, values)| {
+            let source_context = values[0]
+                .operation_index
+                .and_then(|index| operation_sources.get(index));
+            GoogleAdsOperationDiagnostic::from_failures(&values, source_context)
+        })
+        .collect()
+}
+
+fn diagnostic_group_key(error: &GoogleAdsFailureItem) -> String {
+    format!(
+        "{}|{}|{:?}",
+        error.display_message(),
+        error
+            .location
+            .as_deref()
+            .map(normalized_google_ads_location)
+            .unwrap_or_default(),
+        error.length_limit.map(|limit| (limit.field, limit.max))
+    )
+}
+
+fn normalized_google_ads_location(location: &str) -> String {
+    let Some(start) = location.find("mutate_operations[") else {
+        return location.to_string();
+    };
+    let index_start = start + "mutate_operations[".len();
+    let Some(index_end) = location[index_start..].find(']') else {
+        return location.to_string();
+    };
+    let index_end = index_start + index_end;
+
+    format!(
+        "{}mutate_operations[]{}",
+        &location[..start],
+        &location[index_end + 1..]
+    )
+}
+
+fn field_length_limit(location: &str, is_too_long: bool) -> Option<FieldLengthLimit> {
+    if !is_too_long {
+        return None;
+    }
+
+    let limits = [
+        (
+            ".callout_asset.callout_text",
+            FieldLengthLimit {
+                field: "callout text",
+                max: 25,
+            },
+        ),
+        (
+            ".sitelink_asset.link_text",
+            FieldLengthLimit {
+                field: "sitelink text",
+                max: 25,
+            },
+        ),
+        (
+            ".sitelink_asset.description1",
+            FieldLengthLimit {
+                field: "sitelink line1",
+                max: 35,
+            },
+        ),
+        (
+            ".sitelink_asset.description2",
+            FieldLengthLimit {
+                field: "sitelink line2",
+                max: 35,
+            },
+        ),
+        (
+            ".responsive_search_ad.headlines",
+            FieldLengthLimit {
+                field: "responsive search ad headline",
+                max: 30,
+            },
+        ),
+        (
+            ".responsive_search_ad.descriptions",
+            FieldLengthLimit {
+                field: "responsive search ad description",
+                max: 90,
+            },
+        ),
+        (
+            ".responsive_search_ad.path1",
+            FieldLengthLimit {
+                field: "responsive search ad path1",
+                max: 15,
+            },
+        ),
+        (
+            ".responsive_search_ad.path2",
+            FieldLengthLimit {
+                field: "responsive search ad path2",
+                max: 15,
+            },
+        ),
+    ];
+
+    limits
+        .iter()
+        .find_map(|(suffix, limit)| location.contains(suffix).then_some(*limit))
 }
 
 impl fmt::Display for ErrorAggregator {
@@ -331,5 +553,98 @@ impl fmt::Display for ErrorAggregator {
             writeln!(f, " - {}", err)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn too_long_errors_include_limit_without_raw_path_in_title() {
+        let item = GoogleAdsFailureItem {
+            message: "Too long.".to_string(),
+            location: Some(
+                "mutate_operations[10].ad_group_ad_operation.create.ad.responsive_search_ad.descriptions[0].text"
+                    .to_string(),
+            ),
+            operation_index: Some(10),
+            length_limit: field_length_limit(
+                "mutate_operations[10].ad_group_ad_operation.create.ad.responsive_search_ad.descriptions[0].text",
+                true,
+            ),
+        };
+
+        assert_eq!(
+            item.to_string(),
+            "Too long: maximum 90 characters for responsive search ad description"
+        );
+    }
+
+    #[test]
+    fn unknown_length_errors_keep_google_ads_path() {
+        let item = GoogleAdsFailureItem {
+            message: "Resource was not found.".to_string(),
+            location: Some(
+                "mutate_operations[2].campaign_asset_operation.create.asset".to_string(),
+            ),
+            operation_index: Some(2),
+            length_limit: None,
+        };
+
+        assert_eq!(item.to_string(), "Resource was not found.");
+    }
+
+    #[test]
+    fn grouped_diagnostics_collapse_repeated_operations() {
+        let first = GoogleAdsFailureItem {
+            message: "Too long.".to_string(),
+            location: Some(
+                "mutate_operations[9].ad_group_ad_operation.create.ad.responsive_search_ad.descriptions[0].text"
+                    .to_string(),
+            ),
+            operation_index: Some(9),
+            length_limit: field_length_limit(
+                "mutate_operations[9].ad_group_ad_operation.create.ad.responsive_search_ad.descriptions[0].text",
+                true,
+            ),
+        };
+        let second = GoogleAdsFailureItem {
+            operation_index: Some(10),
+            location: Some(
+                "mutate_operations[10].ad_group_ad_operation.create.ad.responsive_search_ad.descriptions[0].text"
+                    .to_string(),
+            ),
+            ..first.clone()
+        };
+
+        let message = grouped_failure_message(&[&first, &second], None);
+
+        assert_eq!(
+            message,
+            "Too long: maximum 90 characters for responsive search ad description"
+        );
+    }
+
+    #[test]
+    fn dependent_asset_link_failures_are_suppressed() {
+        let source = OperationSourceContext {
+            source_name: "campaign.yaml".to_string(),
+            source: "callouts:\n  - text: Too long for a callout\n".to_string(),
+            span: None,
+            label: "this asset link depends on the asset value highlighted here".to_string(),
+        };
+        let error = GoogleAdsFailureItem {
+            message: "Resource was not found.".to_string(),
+            location: Some(
+                "mutate_operations[2].campaign_asset_operation.create.asset".to_string(),
+            ),
+            operation_index: Some(0),
+            length_limit: None,
+        };
+
+        let diagnostics = grouped_operation_diagnostics(&[error], &[source]);
+
+        assert!(diagnostics.is_empty());
     }
 }
