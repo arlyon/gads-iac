@@ -34,7 +34,7 @@ enum QueryType {
 const QUERIES: [(QueryType, &str); 10] = [
     (
         QueryType::Campaign,
-        "SELECT campaign.id, campaign.name, campaign.status, campaign.start_date_time, campaign.end_date_time, campaign.bidding_strategy_type, campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas, campaign_budget.id, campaign_budget.amount_micros FROM campaign WHERE campaign.status != 'REMOVED'",
+        "SELECT campaign.id, campaign.name, campaign.status, campaign.start_date_time, campaign.end_date_time, campaign.bidding_strategy_type, campaign.manual_cpc.enhanced_cpc_enabled, campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas, campaign.maximize_conversions.target_cpa_micros, campaign.maximize_conversion_value.target_roas, campaign_budget.id, campaign_budget.amount_micros FROM campaign WHERE campaign.status != 'REMOVED'",
     ),
     (
         QueryType::AdGroup,
@@ -192,12 +192,24 @@ fn process_campaigns(campaigns: &mut HashMap<i64, Campaign>, res: SearchGoogleAd
                         target_roas: t.target_roas,
                     })
                 }
-                Some(gads_resources::campaign::CampaignBiddingStrategy::MaximizeConversions(_)) => {
-                    Some(BiddingStrategy::MaximizeConversions { target_cpa: None })
+                Some(gads_resources::campaign::CampaignBiddingStrategy::MaximizeConversions(t)) => {
+                    Some(BiddingStrategy::MaximizeConversions {
+                        target_cpa: if t.target_cpa_micros > 0 {
+                            Some(t.target_cpa_micros as f64 / 1_000_000.0)
+                        } else {
+                            None
+                        },
+                    })
                 }
                 Some(
-                    gads_resources::campaign::CampaignBiddingStrategy::MaximizeConversionValue(_),
-                ) => Some(BiddingStrategy::MaximizeConversionValue { target_roas: None }),
+                    gads_resources::campaign::CampaignBiddingStrategy::MaximizeConversionValue(t),
+                ) => Some(BiddingStrategy::MaximizeConversionValue {
+                    target_roas: if t.target_roas > 0.0 {
+                        Some(t.target_roas)
+                    } else {
+                        None
+                    },
+                }),
                 Some(gads_resources::campaign::CampaignBiddingStrategy::ManualCpc(t)) => {
                     Some(BiddingStrategy::ManualCpc {
                         enhanced_cpc_enabled: t.enhanced_cpc_enabled,

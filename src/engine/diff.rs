@@ -36,7 +36,8 @@ use googleads_rs::google::ads::googleads::v23::services::campaign_asset_operatio
 use googleads_rs::google::ads::googleads::v23::services::campaign_budget_operation;
 use googleads_rs::google::ads::googleads::v23::services::campaign_criterion_operation;
 use prost_types::FieldMask;
-use std::collections::HashSet;
+use serde_yaml::{Mapping, Value};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use tracing::{debug, trace};
 
 fn keyword_match_type(kw: &Keyword) -> i32 {
@@ -124,7 +125,29 @@ fn bidding_strategy(
     }
 }
 
-fn bidding_strategy_mask_path(strategy: &BiddingStrategy) -> &'static str {
+fn bidding_strategy_mask_paths(strategy: &BiddingStrategy) -> &'static [&'static str] {
+    match strategy {
+        BiddingStrategy::TargetCpa { .. } => &["target_cpa.target_cpa_micros"],
+        BiddingStrategy::TargetRoas { .. } => &["target_roas.target_roas"],
+        BiddingStrategy::MaximizeConversions { .. } => &["maximize_conversions.target_cpa_micros"],
+        BiddingStrategy::MaximizeConversionValue { .. } => {
+            &["maximize_conversion_value.target_roas"]
+        }
+        BiddingStrategy::ManualCpc { .. } => &["manual_cpc.enhanced_cpc_enabled"],
+    }
+}
+
+fn bidding_strategy_oneof_path(strategy: &BiddingStrategy) -> &'static str {
+    match strategy {
+        BiddingStrategy::TargetCpa { .. } => "target_cpa",
+        BiddingStrategy::TargetRoas { .. } => "target_roas",
+        BiddingStrategy::MaximizeConversions { .. } => "maximize_conversions",
+        BiddingStrategy::MaximizeConversionValue { .. } => "maximize_conversion_value",
+        BiddingStrategy::ManualCpc { .. } => "manual_cpc",
+    }
+}
+
+fn bidding_strategy_variant(strategy: &BiddingStrategy) -> &'static str {
     match strategy {
         BiddingStrategy::TargetCpa { .. } => "target_cpa",
         BiddingStrategy::TargetRoas { .. } => "target_roas",
@@ -143,56 +166,266 @@ pub fn compute_diff(local: &Campaign, remote: &Campaign) -> Vec<String> {
     let mut remote_norm = remote.clone();
     remote_norm.normalize();
 
-    let local_yml = serde_yaml::to_string(&local_norm).unwrap_or_default();
-    let remote_yml = serde_yaml::to_string(&remote_norm).unwrap_or_default();
+    let local_value = serde_yaml::to_value(&local_norm).unwrap_or(Value::Null);
+    let remote_value = serde_yaml::to_value(&remote_norm).unwrap_or(Value::Null);
 
-    if local_yml == remote_yml {
+    if local_value == remote_value {
         return differences;
     }
 
-    let l_lines: Vec<&str> = local_yml.lines().collect();
-    let r_lines: Vec<&str> = remote_yml.lines().collect();
+    diff_yaml_values("", &local_value, &remote_value, &mut differences);
 
-    use std::collections::HashMap;
-    let mut l_counts = HashMap::new();
-    for line in &l_lines {
-        *l_counts.entry(line).or_insert(0) += 1;
-    }
-    let mut r_counts = HashMap::new();
-    for line in &r_lines {
-        *r_counts.entry(line).or_insert(0) += 1;
-    }
-
-    let mut added = Vec::new();
-    let mut r_counts_temp = r_counts.clone();
-    for line in &l_lines {
-        let r_c = r_counts_temp.entry(line).or_insert(0);
-        if *r_c > 0 {
-            *r_c -= 1;
-        } else {
-            added.push(format!("+ {}", line));
-        }
-    }
-
-    let mut removed = Vec::new();
-    let mut l_counts_temp = l_counts.clone();
-    for line in &r_lines {
-        let l_c = l_counts_temp.entry(line).or_insert(0);
-        if *l_c > 0 {
-            *l_c -= 1;
-        } else {
-            removed.push(format!("- {}", line));
-        }
-    }
-
-    differences.extend(added);
-    differences.extend(removed);
-
-    if differences.is_empty() && local_yml != remote_yml {
+    if differences.is_empty() {
         differences.push("~ State difference detected (order/formatting only)".to_string());
     }
 
     differences
+}
+
+fn diff_yaml_values(path: &str, local: &Value, remote: &Value, differences: &mut Vec<String>) {
+    if local == remote {
+        return;
+    }
+
+    match (local, remote) {
+        (Value::Mapping(local_map), Value::Mapping(remote_map)) => {
+            diff_yaml_mappings(path, local_map, remote_map, differences);
+        }
+        (Value::Sequence(local_seq), Value::Sequence(remote_seq)) => {
+            diff_yaml_sequences(path, local_seq, remote_seq, differences);
+        }
+        _ => {
+            let display_path = display_path(path);
+            differences.push(format!(
+                "~ {}: {} -> {}",
+                display_path,
+                inline_yaml_value(remote),
+                inline_yaml_value(local)
+            ));
+        }
+    }
+}
+
+fn diff_yaml_mappings(
+    path: &str,
+    local: &Mapping,
+    remote: &Mapping,
+    differences: &mut Vec<String>,
+) {
+    let local_entries = string_keyed_mapping(local);
+    let remote_entries = string_keyed_mapping(remote);
+    let keys: BTreeSet<&str> = local_entries
+        .keys()
+        .chain(remote_entries.keys())
+        .map(String::as_str)
+        .collect();
+
+    for key in keys {
+        let child_path = join_path(path, key);
+        match (local_entries.get(key), remote_entries.get(key)) {
+            (Some(local_value), Some(remote_value)) => {
+                diff_yaml_values(&child_path, local_value, remote_value, differences);
+            }
+            (Some(local_value), None) => append_block(differences, '+', &child_path, local_value),
+            (None, Some(remote_value)) => append_block(differences, '-', &child_path, remote_value),
+            (None, None) => {}
+        }
+    }
+}
+
+fn diff_yaml_sequences(
+    path: &str,
+    local: &[Value],
+    remote: &[Value],
+    differences: &mut Vec<String>,
+) {
+    if local.iter().all(is_scalar) && remote.iter().all(is_scalar) {
+        diff_scalar_sequences(path, local, remote, differences);
+        return;
+    }
+
+    if let Some((local_items, remote_items)) = keyed_sequence_items(local, remote) {
+        let keys: BTreeSet<&str> = local_items
+            .keys()
+            .chain(remote_items.keys())
+            .map(String::as_str)
+            .collect();
+
+        for key in keys {
+            let child_path = format!("{}[{}]", display_path(path), key);
+            match (local_items.get(key), remote_items.get(key)) {
+                (Some(local_value), Some(remote_value)) => {
+                    diff_yaml_values(&child_path, local_value, remote_value, differences);
+                }
+                (Some(local_value), None) => {
+                    append_block(differences, '+', &child_path, local_value)
+                }
+                (None, Some(remote_value)) => {
+                    append_block(differences, '-', &child_path, remote_value)
+                }
+                (None, None) => {}
+            }
+        }
+        return;
+    }
+
+    let max_len = local.len().max(remote.len());
+    for index in 0..max_len {
+        let child_path = format!("{}[{}]", display_path(path), index);
+        match (local.get(index), remote.get(index)) {
+            (Some(local_value), Some(remote_value)) => {
+                diff_yaml_values(&child_path, local_value, remote_value, differences);
+            }
+            (Some(local_value), None) => append_block(differences, '+', &child_path, local_value),
+            (None, Some(remote_value)) => append_block(differences, '-', &child_path, remote_value),
+            (None, None) => {}
+        }
+    }
+}
+
+fn diff_scalar_sequences(
+    path: &str,
+    local: &[Value],
+    remote: &[Value],
+    differences: &mut Vec<String>,
+) {
+    let mut local_counts = counted_inline_values(local);
+    let mut remote_counts = counted_inline_values(remote);
+    let keys: BTreeSet<String> = local_counts
+        .keys()
+        .chain(remote_counts.keys())
+        .cloned()
+        .collect();
+
+    for key in keys {
+        let local_count = local_counts.remove(&key).unwrap_or(0);
+        let remote_count = remote_counts.remove(&key).unwrap_or(0);
+        for _ in 0..local_count.saturating_sub(remote_count) {
+            differences.push(format!("+ {}[]: {}", display_path(path), key));
+        }
+        for _ in 0..remote_count.saturating_sub(local_count) {
+            differences.push(format!("- {}[]: {}", display_path(path), key));
+        }
+    }
+}
+
+fn keyed_sequence_items<'a>(
+    local: &'a [Value],
+    remote: &'a [Value],
+) -> Option<(BTreeMap<String, &'a Value>, BTreeMap<String, &'a Value>)> {
+    const KEY_FIELDS: &[&str] = &["id", "name", "link_text", "text", "geo_target_constant"];
+
+    for key_field in KEY_FIELDS {
+        let local_items = sequence_items_by_key(local, key_field);
+        let remote_items = sequence_items_by_key(remote, key_field);
+        if let (Some(local_items), Some(remote_items)) = (local_items, remote_items) {
+            return Some((local_items, remote_items));
+        }
+    }
+
+    None
+}
+
+fn sequence_items_by_key<'a>(
+    values: &'a [Value],
+    key_field: &str,
+) -> Option<BTreeMap<String, &'a Value>> {
+    let key = Value::String(key_field.to_string());
+    let mut items = BTreeMap::new();
+
+    for value in values {
+        let Value::Mapping(map) = value else {
+            return None;
+        };
+        let item_key = map.get(&key).map(key_value_to_string)?;
+        if items.insert(item_key, value).is_some() {
+            return None;
+        }
+    }
+
+    Some(items)
+}
+
+fn string_keyed_mapping(mapping: &Mapping) -> BTreeMap<String, &Value> {
+    mapping
+        .iter()
+        .filter_map(|(key, value)| match key {
+            Value::String(key) => Some((key.clone(), value)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn counted_inline_values(values: &[Value]) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for value in values {
+        *counts.entry(inline_yaml_value(value)).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn append_block(differences: &mut Vec<String>, prefix: char, path: &str, value: &Value) {
+    if is_scalar(value) {
+        differences.push(format!(
+            "{} {}: {}",
+            prefix,
+            display_path(path),
+            inline_yaml_value(value)
+        ));
+        return;
+    }
+
+    differences.push(format!("{} {}:", prefix, display_path(path)));
+    for line in block_yaml_value(value) {
+        differences.push(format!("{}   {}", prefix, line));
+    }
+}
+
+fn block_yaml_value(value: &Value) -> Vec<String> {
+    serde_yaml::to_string(value)
+        .unwrap_or_else(|_| inline_yaml_value(value))
+        .lines()
+        .filter(|line| *line != "---")
+        .map(str::to_string)
+        .collect()
+}
+
+fn inline_yaml_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Number(value) => value.to_string(),
+        Value::String(value) => value.clone(),
+        _ => serde_yaml::to_string(value)
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| *line != "---")
+            .collect::<Vec<_>>()
+            .join(" "),
+    }
+}
+
+fn key_value_to_string(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        _ => inline_yaml_value(value),
+    }
+}
+
+fn join_path(path: &str, key: &str) -> String {
+    if path.is_empty() {
+        key.to_string()
+    } else {
+        format!("{}.{}", path, key)
+    }
+}
+
+fn display_path(path: &str) -> &str {
+    if path.is_empty() { "<root>" } else { path }
+}
+
+fn is_scalar(value: &Value) -> bool {
+    !matches!(value, Value::Mapping(_) | Value::Sequence(_))
 }
 
 /// Diffs a list of ad group keywords (positive or negative) and appends removes then creates
@@ -608,9 +841,21 @@ pub fn build_mutations(
             && let Some(strategy) = &local.bidding_strategy
         {
             campaign.campaign_bidding_strategy = Some(bidding_strategy(strategy));
-            update_mask
-                .paths
-                .push(bidding_strategy_mask_path(strategy).to_string());
+            match &r.bidding_strategy {
+                Some(remote_strategy)
+                    if bidding_strategy_variant(strategy)
+                        == bidding_strategy_variant(remote_strategy) =>
+                {
+                    update_mask.paths.extend(
+                        bidding_strategy_mask_paths(strategy)
+                            .iter()
+                            .map(|path| path.to_string()),
+                    );
+                }
+                _ => update_mask
+                    .paths
+                    .push(bidding_strategy_oneof_path(strategy).to_string()),
+            }
             has_changes = true;
         }
 
@@ -965,6 +1210,27 @@ pub fn build_mutations(
                     .iter()
                     .filter_map(|ad| ad.id.map(|id| (id, ad)))
                     .collect();
+            let local_ad_ids: HashSet<i64> = l_ag.ads.iter().filter_map(|ad| ad.id).collect();
+
+            for r_ad in &r_ag.ads {
+                if let Some(ad_id) = r_ad.id
+                    && !local_ad_ids.contains(&ad_id)
+                {
+                    debug!("Removing responsive search ad {}", ad_id);
+                    let op = AdGroupAdOperation {
+                        operation: Some(ad_group_ad_operation::Operation::Remove(format!(
+                            "customers/{}/adGroupAds/{}~{}",
+                            clean_customer_id, ag_id, ad_id
+                        ))),
+                        ..Default::default()
+                    };
+                    operations.push(MutateOperation {
+                        operation: Some(
+                            ads::services::mutate_operation::Operation::AdGroupAdOperation(op),
+                        ),
+                    });
+                }
+            }
 
             for l_ad in &l_ag.ads {
                 match l_ad.id {
@@ -1041,7 +1307,56 @@ pub fn build_mutations(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::schema::{Campaign, Keyword};
+    use crate::models::account::AccountId;
+    use crate::models::schema::{AdGroup, Campaign, Keyword, TextAd};
+
+    fn test_campaign() -> Campaign {
+        Campaign {
+            id: Some(123),
+            name: "Test Campaign".to_string(),
+            status: "ENABLED".to_string(),
+            budget_id: None,
+            daily_budget: None,
+            bidding_strategy: None,
+            start_date: None,
+            end_date: None,
+            locations: vec![],
+            callouts: vec![],
+            sitelinks: vec![],
+            negative_keywords: vec![],
+            ad_groups: vec![],
+        }
+    }
+
+    fn test_ad(id: Option<i64>, final_url: &str) -> TextAd {
+        TextAd {
+            id,
+            headlines: vec![
+                AdText::plain("Headline one".to_string()),
+                AdText::plain("Headline two".to_string()),
+                AdText::plain("Headline three".to_string()),
+            ],
+            descriptions: vec![
+                AdText::plain("Description one".to_string()),
+                AdText::plain("Description two".to_string()),
+            ],
+            final_urls: vec![final_url.to_string()],
+        }
+    }
+
+    fn test_ad_group(id: i64, ads: Vec<TextAd>) -> AdGroup {
+        AdGroup {
+            id: Some(id),
+            name: "Test Ad Group".to_string(),
+            status: "ENABLED".to_string(),
+            demographics: None,
+            ads,
+            keywords: vec![],
+            negative_keywords: vec![],
+            callouts: vec![],
+            sitelinks: vec![],
+        }
+    }
 
     #[test]
     fn test_compute_diff_ignores_keyword_order() {
@@ -1169,5 +1484,137 @@ mod tests {
 
         let diffs = compute_diff(&local, &remote);
         assert!(diffs.is_empty(), "Differences found: {:?}", diffs);
+    }
+
+    #[test]
+    fn test_compute_diff_reports_yaml_paths_for_structural_changes() {
+        let mut local = test_campaign();
+        local.bidding_strategy = Some(BiddingStrategy::ManualCpc {
+            enhanced_cpc_enabled: false,
+        });
+        local.sitelinks = vec![crate::models::schema::Sitelink {
+            asset_id: None,
+            link_text: "Book Online".to_string(),
+            final_urls: vec!["https://example.com/book".to_string()],
+            line1: None,
+            line2: None,
+        }];
+
+        let mut remote = test_campaign();
+        remote.callouts = vec![crate::models::schema::Callout {
+            asset_id: None,
+            text: "Satisfaction Guaranteed".to_string(),
+        }];
+        remote.sitelinks = vec![crate::models::schema::Sitelink {
+            asset_id: None,
+            link_text: "Request Callback".to_string(),
+            final_urls: vec!["https://example.com/callback".to_string()],
+            line1: Some("Prefer to speak to a human?".to_string()),
+            line2: Some("We'll call you back in minutes.".to_string()),
+        }];
+
+        let diffs = compute_diff(&local, &remote);
+
+        assert!(
+            diffs.contains(&"+ bidding_strategy:".to_string()),
+            "missing bidding_strategy addition: {diffs:?}"
+        );
+        assert!(
+            diffs.contains(&"- callouts[Satisfaction Guaranteed]:".to_string()),
+            "missing keyed callout removal: {diffs:?}"
+        );
+        assert!(
+            diffs.contains(&"+ sitelinks[Book Online]:".to_string()),
+            "missing keyed sitelink addition: {diffs:?}"
+        );
+        assert!(
+            diffs.contains(&"- sitelinks[Request Callback]:".to_string()),
+            "missing keyed sitelink removal: {diffs:?}"
+        );
+        assert!(
+            !diffs
+                .iter()
+                .any(|line| line == "- - text: Satisfaction Guaranteed"),
+            "diff should not contain raw unmatched YAML list lines: {diffs:?}"
+        );
+    }
+
+    #[test]
+    fn manual_cpc_update_uses_leaf_field_mask_path() {
+        let mut local = test_campaign();
+        local.bidding_strategy = Some(BiddingStrategy::ManualCpc {
+            enhanced_cpc_enabled: true,
+        });
+        let mut remote = test_campaign();
+        remote.bidding_strategy = Some(BiddingStrategy::ManualCpc {
+            enhanced_cpc_enabled: false,
+        });
+        let account_id = AccountId::new("1234567890").unwrap();
+
+        let operations = build_mutations(&local, Some(&remote), &account_id);
+
+        let operation = operations.first().expect("campaign update operation");
+        let Some(ads::services::mutate_operation::Operation::CampaignOperation(op)) =
+            &operation.operation
+        else {
+            panic!("expected campaign operation");
+        };
+        let update_mask = op.update_mask.as_ref().expect("update mask");
+        assert_eq!(update_mask.paths, vec!["manual_cpc.enhanced_cpc_enabled"]);
+    }
+
+    #[test]
+    fn bidding_strategy_switch_uses_oneof_field_mask_path() {
+        let mut local = test_campaign();
+        local.bidding_strategy = Some(BiddingStrategy::ManualCpc {
+            enhanced_cpc_enabled: false,
+        });
+        let mut remote = test_campaign();
+        remote.bidding_strategy = Some(BiddingStrategy::MaximizeConversions { target_cpa: None });
+        let account_id = AccountId::new("1234567890").unwrap();
+
+        let operations = build_mutations(&local, Some(&remote), &account_id);
+
+        let operation = operations.first().expect("campaign update operation");
+        let Some(ads::services::mutate_operation::Operation::CampaignOperation(op)) =
+            &operation.operation
+        else {
+            panic!("expected campaign operation");
+        };
+        let update_mask = op.update_mask.as_ref().expect("update mask");
+        assert_eq!(update_mask.paths, vec!["manual_cpc"]);
+    }
+
+    #[test]
+    fn build_mutations_removes_remote_ads_missing_locally() {
+        let mut local = test_campaign();
+        local.ad_groups = vec![test_ad_group(
+            456,
+            vec![test_ad(Some(111), "https://keep.test")],
+        )];
+        let mut remote = test_campaign();
+        remote.ad_groups = vec![test_ad_group(
+            456,
+            vec![
+                test_ad(Some(111), "https://keep.test"),
+                test_ad(Some(222), "https://remove.test"),
+            ],
+        )];
+        let account_id = AccountId::new("1234567890").unwrap();
+
+        let operations = build_mutations(&local, Some(&remote), &account_id);
+
+        assert_eq!(operations.len(), 1);
+        let Some(ads::services::mutate_operation::Operation::AdGroupAdOperation(op)) =
+            &operations[0].operation
+        else {
+            panic!("expected ad group ad operation");
+        };
+        assert_eq!(
+            op.operation,
+            Some(ad_group_ad_operation::Operation::Remove(
+                "customers/1234567890/adGroupAds/456~222".to_string()
+            ))
+        );
     }
 }
