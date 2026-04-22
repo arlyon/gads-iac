@@ -93,8 +93,6 @@ pub struct AdGroup {
 
 impl AdGroup {
     pub fn normalize(&mut self) {
-        self.ads
-            .sort_by_key(|a| a.headlines.first().cloned().unwrap_or_default());
         for ad in &mut self.ads {
             ad.normalize();
         }
@@ -138,18 +136,37 @@ pub struct TextAd {
     /// Internal Google Ads ad ID. Set automatically on import; omit when creating.
     pub id: Option<i64>,
     /// Headlines for the ad (up to 15).
-    pub headlines: Vec<String>,
+    pub headlines: Vec<AdText>,
     /// Descriptions for the ad (up to 4).
-    pub descriptions: Vec<String>,
+    pub descriptions: Vec<AdText>,
     /// Landing page URLs.
     pub final_urls: Vec<String>,
 }
 
 impl TextAd {
     pub fn normalize(&mut self) {
-        self.headlines.sort();
-        self.descriptions.sort();
         self.final_urls.sort();
+    }
+}
+
+/// A responsive-search-ad text asset. Use a plain string for unpinned text, or
+/// `{ pin: "Text" }` to pin it to the corresponding list position.
+#[derive(Debug, Clone, PartialEq, Eq, JsonSchema)]
+pub struct AdText {
+    pub text: String,
+    pub pinned: bool,
+}
+
+impl AdText {
+    pub fn plain(text: String) -> Self {
+        Self {
+            text,
+            pinned: false,
+        }
+    }
+
+    pub fn pinned(text: String) -> Self {
+        Self { text, pinned: true }
     }
 }
 
@@ -278,6 +295,40 @@ impl FromStr for Keyword {
                 text: s.to_string(),
                 match_type: "BROAD".to_string(),
             })
+        }
+    }
+}
+
+impl Serialize for AdText {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        if self.pinned {
+            let mut map = std::collections::BTreeMap::new();
+            map.insert("pin", self.text.as_str());
+            map.serialize(serializer)
+        } else {
+            serializer.serialize_str(&self.text)
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AdText {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Raw {
+            Text(String),
+            Pinned { pin: String },
+        }
+
+        match Raw::deserialize(deserializer)? {
+            Raw::Text(text) => Ok(Self::plain(text)),
+            Raw::Pinned { pin } => Ok(Self::pinned(pin)),
         }
     }
 }

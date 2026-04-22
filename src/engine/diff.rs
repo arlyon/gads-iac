@@ -1,21 +1,40 @@
-use crate::models::schema::{Campaign, Keyword};
-use googleads_rs::google::ads::googleads::v23::common::KeywordInfo;
+use crate::models::schema::{AdText, BiddingStrategy, Campaign, Keyword, Sitelink};
+use googleads_rs::google::ads::googleads::v23 as ads;
+use googleads_rs::google::ads::googleads::v23::common::{AdTextAsset, KeywordInfo};
+use googleads_rs::google::ads::googleads::v23::enums::ad_group_ad_status_enum::AdGroupAdStatus;
 use googleads_rs::google::ads::googleads::v23::enums::ad_group_status_enum::AdGroupStatus;
+use googleads_rs::google::ads::googleads::v23::enums::asset_field_type_enum::AssetFieldType;
 use googleads_rs::google::ads::googleads::v23::enums::campaign_status_enum::CampaignStatus;
 use googleads_rs::google::ads::googleads::v23::enums::keyword_match_type_enum::KeywordMatchType;
-use googleads_rs::google::ads::googleads::v23::resources::campaign_criterion;
-use googleads_rs::google::ads::googleads::v23::resources::ad_group_criterion;
+use googleads_rs::google::ads::googleads::v23::enums::served_asset_field_type_enum::ServedAssetFieldType;
+use googleads_rs::google::ads::googleads::v23::resources::Ad as RemoteAd;
 use googleads_rs::google::ads::googleads::v23::resources::AdGroup as RemoteAdGroup;
+use googleads_rs::google::ads::googleads::v23::resources::AdGroupAd as RemoteAdGroupAd;
 use googleads_rs::google::ads::googleads::v23::resources::AdGroupCriterion;
+use googleads_rs::google::ads::googleads::v23::resources::Asset;
 use googleads_rs::google::ads::googleads::v23::resources::Campaign as RemoteCampaign;
+use googleads_rs::google::ads::googleads::v23::resources::CampaignAsset;
+use googleads_rs::google::ads::googleads::v23::resources::CampaignBudget;
 use googleads_rs::google::ads::googleads::v23::resources::CampaignCriterion;
-use googleads_rs::google::ads::googleads::v23::services::ad_group_criterion_operation;
-use googleads_rs::google::ads::googleads::v23::services::campaign_criterion_operation;
+use googleads_rs::google::ads::googleads::v23::resources::ad;
+use googleads_rs::google::ads::googleads::v23::resources::ad_group_criterion;
+use googleads_rs::google::ads::googleads::v23::resources::asset;
+use googleads_rs::google::ads::googleads::v23::resources::campaign_criterion;
+use googleads_rs::google::ads::googleads::v23::services::AdGroupAdOperation;
 use googleads_rs::google::ads::googleads::v23::services::AdGroupCriterionOperation;
 use googleads_rs::google::ads::googleads::v23::services::AdGroupOperation;
+use googleads_rs::google::ads::googleads::v23::services::AssetOperation;
+use googleads_rs::google::ads::googleads::v23::services::CampaignAssetOperation;
+use googleads_rs::google::ads::googleads::v23::services::CampaignBudgetOperation;
 use googleads_rs::google::ads::googleads::v23::services::CampaignCriterionOperation;
 use googleads_rs::google::ads::googleads::v23::services::CampaignOperation;
 use googleads_rs::google::ads::googleads::v23::services::MutateOperation;
+use googleads_rs::google::ads::googleads::v23::services::ad_group_ad_operation;
+use googleads_rs::google::ads::googleads::v23::services::ad_group_criterion_operation;
+use googleads_rs::google::ads::googleads::v23::services::asset_operation;
+use googleads_rs::google::ads::googleads::v23::services::campaign_asset_operation;
+use googleads_rs::google::ads::googleads::v23::services::campaign_budget_operation;
+use googleads_rs::google::ads::googleads::v23::services::campaign_criterion_operation;
 use prost_types::FieldMask;
 use std::collections::HashSet;
 use tracing::{debug, trace};
@@ -25,6 +44,93 @@ fn keyword_match_type(kw: &Keyword) -> i32 {
         "EXACT" => KeywordMatchType::Exact as i32,
         "PHRASE" => KeywordMatchType::Phrase as i32,
         _ => KeywordMatchType::Broad as i32,
+    }
+}
+
+fn micros(value: f64) -> i64 {
+    (value * 1_000_000.0).round() as i64
+}
+
+fn campaign_resource(customer_id: &str, campaign_id: i64) -> String {
+    format!("customers/{}/campaigns/{}", customer_id, campaign_id)
+}
+
+fn ad_group_resource(customer_id: &str, ad_group_id: i64) -> String {
+    format!("customers/{}/adGroups/{}", customer_id, ad_group_id)
+}
+
+fn asset_resource(customer_id: &str, asset_id: i64) -> String {
+    format!("customers/{}/assets/{}", customer_id, asset_id)
+}
+
+fn ad_text_asset(text: &AdText, index: usize, headline: bool) -> AdTextAsset {
+    let pinned_field = if text.pinned {
+        match (headline, index) {
+            (true, 0) => ServedAssetFieldType::Headline1,
+            (true, 1) => ServedAssetFieldType::Headline2,
+            (true, 2) => ServedAssetFieldType::Headline3,
+            (false, 0) => ServedAssetFieldType::Description1,
+            (false, 1) => ServedAssetFieldType::Description2,
+            _ => ServedAssetFieldType::Unspecified,
+        }
+    } else {
+        ServedAssetFieldType::Unspecified
+    };
+
+    AdTextAsset {
+        text: text.text.clone(),
+        pinned_field: pinned_field as i32,
+        ..Default::default()
+    }
+}
+
+fn bidding_strategy(
+    strategy: &BiddingStrategy,
+) -> ads::resources::campaign::CampaignBiddingStrategy {
+    match strategy {
+        BiddingStrategy::TargetCpa { target_cpa } => {
+            ads::resources::campaign::CampaignBiddingStrategy::TargetCpa(ads::common::TargetCpa {
+                target_cpa_micros: micros(*target_cpa),
+                ..Default::default()
+            })
+        }
+        BiddingStrategy::TargetRoas { target_roas } => {
+            ads::resources::campaign::CampaignBiddingStrategy::TargetRoas(ads::common::TargetRoas {
+                target_roas: *target_roas,
+                ..Default::default()
+            })
+        }
+        BiddingStrategy::MaximizeConversions { target_cpa } => {
+            ads::resources::campaign::CampaignBiddingStrategy::MaximizeConversions(
+                ads::common::MaximizeConversions {
+                    target_cpa_micros: target_cpa.map(micros).unwrap_or_default(),
+                    ..Default::default()
+                },
+            )
+        }
+        BiddingStrategy::MaximizeConversionValue { target_roas } => {
+            ads::resources::campaign::CampaignBiddingStrategy::MaximizeConversionValue(
+                ads::common::MaximizeConversionValue {
+                    target_roas: target_roas.unwrap_or_default(),
+                    ..Default::default()
+                },
+            )
+        }
+        BiddingStrategy::ManualCpc {
+            enhanced_cpc_enabled,
+        } => ads::resources::campaign::CampaignBiddingStrategy::ManualCpc(ads::common::ManualCpc {
+            enhanced_cpc_enabled: *enhanced_cpc_enabled,
+        }),
+    }
+}
+
+fn bidding_strategy_mask_path(strategy: &BiddingStrategy) -> &'static str {
+    match strategy {
+        BiddingStrategy::TargetCpa { .. } => "target_cpa",
+        BiddingStrategy::TargetRoas { .. } => "target_roas",
+        BiddingStrategy::MaximizeConversions { .. } => "maximize_conversions",
+        BiddingStrategy::MaximizeConversionValue { .. } => "maximize_conversion_value",
+        BiddingStrategy::ManualCpc { .. } => "manual_cpc",
     }
 }
 
@@ -134,21 +240,307 @@ fn diff_ad_group_keywords(
                 kw
             );
             let op = AdGroupCriterionOperation {
-                operation: Some(ad_group_criterion_operation::Operation::Create(AdGroupCriterion {
-                    ad_group: format!("customers/{}/adGroups/{}", customer_id, ag_id),
-                    negative,
-                    criterion: Some(ad_group_criterion::Criterion::Keyword(KeywordInfo {
-                        text: kw.text.clone(),
-                        match_type: keyword_match_type(kw),
-                    })),
-                    ..Default::default()
-                })),
+                operation: Some(ad_group_criterion_operation::Operation::Create(
+                    AdGroupCriterion {
+                        ad_group: format!("customers/{}/adGroups/{}", customer_id, ag_id),
+                        negative,
+                        criterion: Some(ad_group_criterion::Criterion::Keyword(KeywordInfo {
+                            text: kw.text.clone(),
+                            match_type: keyword_match_type(kw),
+                        })),
+                        ..Default::default()
+                    },
+                )),
                 ..Default::default()
             };
             operations.push(MutateOperation {
                 operation: Some(googleads_rs::google::ads::googleads::v23::services::mutate_operation::Operation::AdGroupCriterionOperation(op)),
             });
         }
+    }
+}
+
+fn diff_campaign_locations(
+    operations: &mut Vec<MutateOperation>,
+    customer_id: &str,
+    campaign_id: i64,
+    local: &Campaign,
+    remote: &Campaign,
+) {
+    let remote_set: HashSet<String> = remote
+        .locations
+        .iter()
+        .map(|l| l.geo_target_constant.clone())
+        .collect();
+    let local_set: HashSet<String> = local
+        .locations
+        .iter()
+        .map(|l| l.geo_target_constant.clone())
+        .collect();
+
+    for location in &remote.locations {
+        if !local_set.contains(&location.geo_target_constant)
+            && let Some(criterion_id) = location.criterion_id
+        {
+            operations.push(MutateOperation {
+                operation: Some(
+                    ads::services::mutate_operation::Operation::CampaignCriterionOperation(
+                        CampaignCriterionOperation {
+                            operation: Some(campaign_criterion_operation::Operation::Remove(
+                                format!(
+                                    "customers/{}/campaignCriteria/{}~{}",
+                                    customer_id, campaign_id, criterion_id
+                                ),
+                            )),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+            });
+        }
+    }
+
+    for location in &local.locations {
+        if !remote_set.contains(&location.geo_target_constant) {
+            operations.push(MutateOperation {
+                operation: Some(
+                    ads::services::mutate_operation::Operation::CampaignCriterionOperation(
+                        CampaignCriterionOperation {
+                            operation: Some(campaign_criterion_operation::Operation::Create(
+                                CampaignCriterion {
+                                    campaign: campaign_resource(customer_id, campaign_id),
+                                    criterion: Some(campaign_criterion::Criterion::Location(
+                                        ads::common::LocationInfo {
+                                            geo_target_constant: location
+                                                .geo_target_constant
+                                                .clone(),
+                                        },
+                                    )),
+                                    ..Default::default()
+                                },
+                            )),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+            });
+        }
+    }
+}
+
+fn create_callout_asset_operation(resource_name: String, text: String) -> AssetOperation {
+    AssetOperation {
+        operation: Some(asset_operation::Operation::Create(Asset {
+            resource_name,
+            asset_data: Some(asset::AssetData::CalloutAsset(ads::common::CalloutAsset {
+                callout_text: text,
+                ..Default::default()
+            })),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+fn create_sitelink_asset_operation(resource_name: String, sitelink: &Sitelink) -> AssetOperation {
+    AssetOperation {
+        operation: Some(asset_operation::Operation::Create(Asset {
+            resource_name,
+            final_urls: sitelink.final_urls.clone(),
+            asset_data: Some(asset::AssetData::SitelinkAsset(
+                ads::common::SitelinkAsset {
+                    link_text: sitelink.link_text.clone(),
+                    description1: sitelink.line1.clone().unwrap_or_default(),
+                    description2: sitelink.line2.clone().unwrap_or_default(),
+                    ..Default::default()
+                },
+            )),
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+fn create_campaign_asset_link_operation(
+    customer_id: &str,
+    campaign_id: i64,
+    asset: String,
+    field_type: AssetFieldType,
+) -> CampaignAssetOperation {
+    CampaignAssetOperation {
+        operation: Some(campaign_asset_operation::Operation::Create(CampaignAsset {
+            campaign: campaign_resource(customer_id, campaign_id),
+            asset,
+            field_type: field_type as i32,
+            ..Default::default()
+        })),
+        ..Default::default()
+    }
+}
+
+fn diff_campaign_callouts(
+    operations: &mut Vec<MutateOperation>,
+    customer_id: &str,
+    campaign_id: i64,
+    local: &Campaign,
+    remote: &Campaign,
+    next_temp_asset: &mut i64,
+) {
+    let remote_set: HashSet<String> = remote.callouts.iter().map(|c| c.text.clone()).collect();
+    let local_set: HashSet<String> = local.callouts.iter().map(|c| c.text.clone()).collect();
+
+    for callout in &remote.callouts {
+        if !local_set.contains(&callout.text)
+            && let Some(asset_id) = callout.asset_id
+        {
+            operations.push(MutateOperation {
+                operation: Some(
+                    ads::services::mutate_operation::Operation::CampaignAssetOperation(
+                        CampaignAssetOperation {
+                            operation: Some(campaign_asset_operation::Operation::Remove(format!(
+                                "customers/{}/campaignAssets/{}~{}~{}",
+                                customer_id,
+                                campaign_id,
+                                asset_id,
+                                AssetFieldType::Callout as i32
+                            ))),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+            });
+        }
+    }
+
+    for callout in &local.callouts {
+        if !remote_set.contains(&callout.text) {
+            let temp_resource = format!("customers/{}/assets/{}", customer_id, *next_temp_asset);
+            *next_temp_asset -= 1;
+            operations.push(MutateOperation {
+                operation: Some(ads::services::mutate_operation::Operation::AssetOperation(
+                    create_callout_asset_operation(temp_resource.clone(), callout.text.clone()),
+                )),
+            });
+            operations.push(MutateOperation {
+                operation: Some(
+                    ads::services::mutate_operation::Operation::CampaignAssetOperation(
+                        create_campaign_asset_link_operation(
+                            customer_id,
+                            campaign_id,
+                            temp_resource,
+                            AssetFieldType::Callout,
+                        ),
+                    ),
+                ),
+            });
+        }
+    }
+}
+
+fn diff_campaign_sitelinks(
+    operations: &mut Vec<MutateOperation>,
+    customer_id: &str,
+    campaign_id: i64,
+    local: &Campaign,
+    remote: &Campaign,
+    next_temp_asset: &mut i64,
+) {
+    let remote_set: HashSet<String> = remote
+        .sitelinks
+        .iter()
+        .map(|s| s.link_text.clone())
+        .collect();
+    let local_set: HashSet<String> = local
+        .sitelinks
+        .iter()
+        .map(|s| s.link_text.clone())
+        .collect();
+
+    for sitelink in &remote.sitelinks {
+        if !local_set.contains(&sitelink.link_text)
+            && let Some(asset_id) = sitelink.asset_id
+        {
+            operations.push(MutateOperation {
+                operation: Some(
+                    ads::services::mutate_operation::Operation::CampaignAssetOperation(
+                        CampaignAssetOperation {
+                            operation: Some(campaign_asset_operation::Operation::Remove(format!(
+                                "customers/{}/campaignAssets/{}~{}~{}",
+                                customer_id,
+                                campaign_id,
+                                asset_id,
+                                AssetFieldType::Sitelink as i32
+                            ))),
+                            ..Default::default()
+                        },
+                    ),
+                ),
+            });
+        }
+    }
+
+    for sitelink in &local.sitelinks {
+        if !remote_set.contains(&sitelink.link_text) {
+            let temp_resource = format!("customers/{}/assets/{}", customer_id, *next_temp_asset);
+            *next_temp_asset -= 1;
+            operations.push(MutateOperation {
+                operation: Some(ads::services::mutate_operation::Operation::AssetOperation(
+                    create_sitelink_asset_operation(temp_resource.clone(), sitelink),
+                )),
+            });
+            operations.push(MutateOperation {
+                operation: Some(
+                    ads::services::mutate_operation::Operation::CampaignAssetOperation(
+                        create_campaign_asset_link_operation(
+                            customer_id,
+                            campaign_id,
+                            temp_resource,
+                            AssetFieldType::Sitelink,
+                        ),
+                    ),
+                ),
+            });
+        }
+    }
+}
+
+fn rsa_ad(ad: &crate::models::schema::TextAd) -> RemoteAd {
+    RemoteAd {
+        final_urls: ad.final_urls.clone(),
+        ad_data: Some(ad::AdData::ResponsiveSearchAd(
+            ads::common::ResponsiveSearchAdInfo {
+                headlines: ad
+                    .headlines
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, h)| ad_text_asset(h, idx, true))
+                    .collect(),
+                descriptions: ad
+                    .descriptions
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, d)| ad_text_asset(d, idx, false))
+                    .collect(),
+                ..Default::default()
+            },
+        )),
+        ..Default::default()
+    }
+}
+
+fn add_rsa_ad_operation(ad_group: String, ad: &crate::models::schema::TextAd) -> MutateOperation {
+    MutateOperation {
+        operation: Some(
+            ads::services::mutate_operation::Operation::AdGroupAdOperation(AdGroupAdOperation {
+                operation: Some(ad_group_ad_operation::Operation::Create(RemoteAdGroupAd {
+                    ad_group,
+                    status: AdGroupAdStatus::Enabled as i32,
+                    ad: Some(rsa_ad(ad)),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }),
+        ),
     }
 }
 
@@ -160,6 +552,8 @@ pub fn build_mutations(
 ) -> Vec<MutateOperation> {
     let mut operations = Vec::new();
     let clean_customer_id = account_id.unhyphenated();
+    let mut next_temp_asset = -1;
+    let mut next_temp_ad_group = -10_000;
 
     if let Some(r) = remote {
         debug!(
@@ -196,6 +590,30 @@ pub fn build_mutations(
             has_changes = true;
         }
 
+        if local.start_date != r.start_date
+            && let Some(start_date) = &local.start_date
+        {
+            campaign.start_date_time = start_date.clone();
+            update_mask.paths.push("start_date_time".to_string());
+            has_changes = true;
+        }
+
+        if local.end_date != r.end_date {
+            campaign.end_date_time = local.end_date.clone().unwrap_or_default();
+            update_mask.paths.push("end_date_time".to_string());
+            has_changes = true;
+        }
+
+        if local.bidding_strategy != r.bidding_strategy
+            && let Some(strategy) = &local.bidding_strategy
+        {
+            campaign.campaign_bidding_strategy = Some(bidding_strategy(strategy));
+            update_mask
+                .paths
+                .push(bidding_strategy_mask_path(strategy).to_string());
+            has_changes = true;
+        }
+
         if has_changes {
             trace!("Generated FieldMask with paths: {:?}", update_mask.paths);
             let op = CampaignOperation {
@@ -206,6 +624,56 @@ pub fn build_mutations(
                 operation: Some(googleads_rs::google::ads::googleads::v23::services::mutate_operation::Operation::CampaignOperation(op)),
             });
         }
+
+        if local.daily_budget != r.daily_budget
+            && let (Some(budget), Some(budget_id)) = (local.daily_budget, r.budget_id)
+        {
+            debug!("Campaign budget drift detected. Queuing budget update.");
+            let op = CampaignBudgetOperation {
+                update_mask: Some(FieldMask {
+                    paths: vec!["amount_micros".to_string()],
+                }),
+                operation: Some(campaign_budget_operation::Operation::Update(
+                    CampaignBudget {
+                        resource_name: format!(
+                            "customers/{}/campaignBudgets/{}",
+                            clean_customer_id, budget_id
+                        ),
+                        amount_micros: micros(budget),
+                        ..Default::default()
+                    },
+                )),
+            };
+            operations.push(MutateOperation {
+                operation: Some(
+                    ads::services::mutate_operation::Operation::CampaignBudgetOperation(op),
+                ),
+            });
+        }
+
+        diff_campaign_locations(
+            &mut operations,
+            &clean_customer_id,
+            local.id.unwrap_or(0),
+            local,
+            r,
+        );
+        diff_campaign_callouts(
+            &mut operations,
+            &clean_customer_id,
+            local.id.unwrap_or(0),
+            local,
+            r,
+            &mut next_temp_asset,
+        );
+        diff_campaign_sitelinks(
+            &mut operations,
+            &clean_customer_id,
+            local.id.unwrap_or(0),
+            local,
+            r,
+            &mut next_temp_asset,
+        );
 
         // Sub-entity Diffing (Sitelinks)
         for (l_site, r_site) in local.sitelinks.iter().zip(r.sitelinks.iter()) {
@@ -298,8 +766,13 @@ pub fn build_mutations(
 
         // Campaign negative keywords — removes before creates so the pair is atomic in the batch.
         let campaign_id = local.id.unwrap_or(0);
-        let remote_neg: HashSet<String> = r.negative_keywords.iter().map(|k| k.to_string()).collect();
-        let local_neg: HashSet<String> = local.negative_keywords.iter().map(|k| k.to_string()).collect();
+        let remote_neg: HashSet<String> =
+            r.negative_keywords.iter().map(|k| k.to_string()).collect();
+        let local_neg: HashSet<String> = local
+            .negative_keywords
+            .iter()
+            .map(|k| k.to_string())
+            .collect();
 
         for kw in &r.negative_keywords {
             if !local_neg.contains(&kw.to_string()) {
@@ -322,15 +795,20 @@ pub fn build_mutations(
             if !remote_neg.contains(&kw.to_string()) {
                 debug!("Adding campaign negative keyword '{}'", kw);
                 let op = CampaignCriterionOperation {
-                    operation: Some(campaign_criterion_operation::Operation::Create(CampaignCriterion {
-                        campaign: format!("customers/{}/campaigns/{}", clean_customer_id, campaign_id),
-                        negative: true,
-                        criterion: Some(campaign_criterion::Criterion::Keyword(KeywordInfo {
-                            text: kw.text.clone(),
-                            match_type: keyword_match_type(kw),
-                        })),
-                        ..Default::default()
-                    })),
+                    operation: Some(campaign_criterion_operation::Operation::Create(
+                        CampaignCriterion {
+                            campaign: format!(
+                                "customers/{}/campaigns/{}",
+                                clean_customer_id, campaign_id
+                            ),
+                            negative: true,
+                            criterion: Some(campaign_criterion::Criterion::Keyword(KeywordInfo {
+                                text: kw.text.clone(),
+                                match_type: keyword_match_type(kw),
+                            })),
+                            ..Default::default()
+                        },
+                    )),
                     ..Default::default()
                 };
                 operations.push(MutateOperation {
@@ -349,7 +827,81 @@ pub fn build_mutations(
         for l_ag in &local.ad_groups {
             let ag_id = match l_ag.id {
                 Some(id) => id,
-                None => continue,
+                None => {
+                    let temp_resource = ad_group_resource(&clean_customer_id, next_temp_ad_group);
+                    next_temp_ad_group -= 1;
+                    debug!("Creating ad group '{}'", l_ag.name);
+                    let op = AdGroupOperation {
+                        operation: Some(ads::services::ad_group_operation::Operation::Create(
+                            RemoteAdGroup {
+                                resource_name: temp_resource.clone(),
+                                campaign: campaign_resource(
+                                    &clean_customer_id,
+                                    local.id.unwrap_or(0),
+                                ),
+                                name: l_ag.name.clone(),
+                                status: match l_ag.status.as_str() {
+                                    "ENABLED" => AdGroupStatus::Enabled as i32,
+                                    "PAUSED" => AdGroupStatus::Paused as i32,
+                                    "REMOVED" => AdGroupStatus::Removed as i32,
+                                    _ => AdGroupStatus::Unspecified as i32,
+                                },
+                                ..Default::default()
+                            },
+                        )),
+                        ..Default::default()
+                    };
+                    operations.push(MutateOperation {
+                        operation: Some(
+                            ads::services::mutate_operation::Operation::AdGroupOperation(op),
+                        ),
+                    });
+
+                    for kw in &l_ag.keywords {
+                        operations.push(MutateOperation {
+                            operation: Some(ads::services::mutate_operation::Operation::AdGroupCriterionOperation(
+                                AdGroupCriterionOperation {
+                                    operation: Some(ad_group_criterion_operation::Operation::Create(
+                                        AdGroupCriterion {
+                                            ad_group: temp_resource.clone(),
+                                            negative: false,
+                                            criterion: Some(ad_group_criterion::Criterion::Keyword(KeywordInfo {
+                                                text: kw.text.clone(),
+                                                match_type: keyword_match_type(kw),
+                                            })),
+                                            ..Default::default()
+                                        },
+                                    )),
+                                    ..Default::default()
+                                },
+                            )),
+                        });
+                    }
+                    for kw in &l_ag.negative_keywords {
+                        operations.push(MutateOperation {
+                            operation: Some(ads::services::mutate_operation::Operation::AdGroupCriterionOperation(
+                                AdGroupCriterionOperation {
+                                    operation: Some(ad_group_criterion_operation::Operation::Create(
+                                        AdGroupCriterion {
+                                            ad_group: temp_resource.clone(),
+                                            negative: true,
+                                            criterion: Some(ad_group_criterion::Criterion::Keyword(KeywordInfo {
+                                                text: kw.text.clone(),
+                                                match_type: keyword_match_type(kw),
+                                            })),
+                                            ..Default::default()
+                                        },
+                                    )),
+                                    ..Default::default()
+                                },
+                            )),
+                        });
+                    }
+                    for ad in &l_ag.ads {
+                        operations.push(add_rsa_ad_operation(temp_resource.clone(), ad));
+                    }
+                    continue;
+                }
             };
             let r_ag = match remote_ag_map.get(&ag_id) {
                 Some(ag) => ag,
@@ -407,6 +959,58 @@ pub fn build_mutations(
                 &r_ag.negative_keywords,
                 true,
             );
+
+            let remote_ads_by_id: std::collections::HashMap<i64, &crate::models::schema::TextAd> =
+                r_ag.ads
+                    .iter()
+                    .filter_map(|ad| ad.id.map(|id| (id, ad)))
+                    .collect();
+
+            for l_ad in &l_ag.ads {
+                match l_ad.id {
+                    Some(ad_id) => {
+                        if let Some(r_ad) = remote_ads_by_id.get(&ad_id)
+                            && l_ad != *r_ad
+                        {
+                            debug!("Responsive search ad {} drift detected.", ad_id);
+                            let mut ad = rsa_ad(l_ad);
+                            ad.resource_name =
+                                format!("customers/{}/ads/{}", clean_customer_id, ad_id);
+                            let op = AdGroupAdOperation {
+                                update_mask: Some(FieldMask {
+                                    paths: vec![
+                                        "ad.final_urls".to_string(),
+                                        "ad.responsive_search_ad.headlines".to_string(),
+                                        "ad.responsive_search_ad.descriptions".to_string(),
+                                    ],
+                                }),
+                                operation: Some(ad_group_ad_operation::Operation::Update(
+                                    RemoteAdGroupAd {
+                                        resource_name: format!(
+                                            "customers/{}/adGroupAds/{}~{}",
+                                            clean_customer_id, ag_id, ad_id
+                                        ),
+                                        ad: Some(ad),
+                                        ..Default::default()
+                                    },
+                                )),
+                                ..Default::default()
+                            };
+                            operations.push(MutateOperation {
+                                operation: Some(
+                                    ads::services::mutate_operation::Operation::AdGroupAdOperation(
+                                        op,
+                                    ),
+                                ),
+                            });
+                        }
+                    }
+                    None => operations.push(add_rsa_ad_operation(
+                        ad_group_resource(&clean_customer_id, ag_id),
+                        l_ad,
+                    )),
+                }
+            }
         }
     } else {
         // Create handling (simplified for this scope)

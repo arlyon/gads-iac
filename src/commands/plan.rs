@@ -1,5 +1,5 @@
-use crate::commands::{load_campaigns_by_account, print_diff_lines};
 use crate::commands::import::fetch_remote_campaigns;
+use crate::commands::{load_campaigns_by_account, print_diff_lines};
 use crate::engine::config::Config;
 use crate::engine::diff::compute_diff;
 use anyhow::Result;

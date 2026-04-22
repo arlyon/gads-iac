@@ -1,11 +1,12 @@
 use crate::api::client::{GoogleAdsClient, ads};
 use crate::engine::config::Config;
 use crate::models::schema::{
-    AdGroup, BiddingStrategy, Callout, Campaign, Keyword, Sitelink, TextAd,
+    AdGroup, AdText, BiddingStrategy, Callout, Campaign, Keyword, Location, Sitelink, TextAd,
 };
 use ads::enums::ad_group_status_enum::AdGroupStatus;
 use ads::enums::campaign_status_enum::CampaignStatus;
 use ads::enums::keyword_match_type_enum::KeywordMatchType;
+use ads::enums::served_asset_field_type_enum::ServedAssetFieldType;
 use ads::resources as gads_resources;
 use ads::services::{SearchGoogleAdsRequest, SearchGoogleAdsResponse};
 use anyhow::Result;
@@ -27,9 +28,10 @@ enum QueryType {
     CampaignCallout,
     AdGroupCallout,
     CampaignNegativeKeyword,
+    CampaignLocation,
 }
 
-const QUERIES: [(QueryType, &str); 9] = [
+const QUERIES: [(QueryType, &str); 10] = [
     (
         QueryType::Campaign,
         "SELECT campaign.id, campaign.name, campaign.status, campaign.start_date_time, campaign.end_date_time, campaign.bidding_strategy_type, campaign.target_cpa.target_cpa_micros, campaign.target_roas.target_roas, campaign_budget.id, campaign_budget.amount_micros FROM campaign WHERE campaign.status != 'REMOVED'",
@@ -65,6 +67,10 @@ const QUERIES: [(QueryType, &str); 9] = [
     (
         QueryType::CampaignNegativeKeyword,
         "SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.keyword.text, campaign_criterion.keyword.match_type, campaign_criterion.negative FROM campaign_criterion WHERE campaign_criterion.type = 'KEYWORD'",
+    ),
+    (
+        QueryType::CampaignLocation,
+        "SELECT campaign.id, campaign_criterion.criterion_id, campaign_criterion.location.geo_target_constant FROM campaign_criterion WHERE campaign_criterion.type = 'LOCATION' AND campaign_criterion.negative = false AND campaign_criterion.status != 'REMOVED'",
     ),
 ];
 
@@ -142,6 +148,9 @@ fn assemble_campaigns(
     }
     if let Some(res) = results.remove(&QueryType::CampaignNegativeKeyword) {
         process_campaign_negative_keywords(&mut campaigns, res);
+    }
+    if let Some(res) = results.remove(&QueryType::CampaignLocation) {
+        process_campaign_locations(&mut campaigns, res);
     }
 
     // Final Assembly
@@ -285,10 +294,45 @@ fn process_ads(ad_groups_map: &mut HashMap<i64, (i64, AdGroup)>, res: SearchGoog
             entry.1.ads.push(TextAd {
                 id: Some(ad.id),
                 final_urls: ad.final_urls,
-                headlines: rsa.headlines.into_iter().map(|h| h.text).collect(),
-                descriptions: rsa.descriptions.into_iter().map(|d| d.text).collect(),
+                headlines: rsa
+                    .headlines
+                    .into_iter()
+                    .map(|h| ad_text_from_remote(h, true))
+                    .collect(),
+                descriptions: rsa
+                    .descriptions
+                    .into_iter()
+                    .map(|d| ad_text_from_remote(d, false))
+                    .collect(),
             });
         }
+    }
+}
+
+fn ad_text_from_remote(asset: ads::common::AdTextAsset, headline: bool) -> AdText {
+    let pinned = match ServedAssetFieldType::try_from(asset.pinned_field) {
+        Ok(ServedAssetFieldType::Headline1)
+        | Ok(ServedAssetFieldType::Headline2)
+        | Ok(ServedAssetFieldType::Headline3)
+        | Ok(ServedAssetFieldType::Headline)
+            if headline =>
+        {
+            true
+        }
+        Ok(ServedAssetFieldType::Description1)
+        | Ok(ServedAssetFieldType::Description2)
+        | Ok(ServedAssetFieldType::Description)
+            if !headline =>
+        {
+            true
+        }
+        _ => false,
+    };
+
+    if pinned {
+        AdText::pinned(asset.text)
+    } else {
+        AdText::plain(asset.text)
     }
 }
 
@@ -382,6 +426,23 @@ fn process_campaign_negative_keywords(
                     _ => "UNKNOWN",
                 }
                 .to_string(),
+            });
+        }
+    }
+}
+
+fn process_campaign_locations(
+    campaigns: &mut HashMap<i64, Campaign>,
+    res: SearchGoogleAdsResponse,
+) {
+    for row in res.results {
+        if let (Some(c), Some(cc)) = (row.campaign, row.campaign_criterion)
+            && let Some(camp) = campaigns.get_mut(&c.id)
+            && let Some(gads_resources::campaign_criterion::Criterion::Location(l)) = cc.criterion
+        {
+            camp.locations.push(Location {
+                criterion_id: Some(cc.criterion_id),
+                geo_target_constant: l.geo_target_constant,
             });
         }
     }

@@ -112,14 +112,16 @@ ad_groups:
     ads:
       - headlines:
           - Running Shoes
-          - Shop Running Shoes
+          - pin: Shop Running Shoes
           - Free Shipping Over $50
         descriptions:
           - Top brands, fast delivery. Shop now.
-          - Find the perfect pair today.
+          - pin: Find the perfect pair today.
         final_urls:
           - https://example.com/running-shoes
 ```
+
+Responsive search ad `headlines` and `descriptions` can be plain strings or pinned entries. A pinned entry is pinned to its list position (`headline_1`, `headline_2`, `headline_3`, `description_1`, or `description_2`) when Google Ads supports that position.
 
 ### Keyword match types
 

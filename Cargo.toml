@@ -8,6 +8,7 @@ repository = "https://github.com/arlyon/gads-iac"
 anyhow = "1.0.102"
 clap = { version = "4.6.0", features = ["derive"] }
 googleads-rs = "0.13.0"
+miette = { version = "7.6.0", features = ["fancy"] }
 prost = "0.14.3"
 prost-types = "0.14.3"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -16,6 +17,7 @@ tokio = { version = "1.51.0", features = ["full"] }
 tonic = "0.14.5"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+thiserror = "2.0.17"
 yup-oauth2 = "12.1.2"
 colored = "2.1.0"
 schemars = { version = "0.8", features = ["derive"] }
